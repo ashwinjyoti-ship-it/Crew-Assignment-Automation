@@ -281,11 +281,8 @@ app.post('/api/events/upload', async (c) => {
       let manualOnly = manualCheck.manual || isMultiVenue
       let manualReason = manualCheck.reason || (isMultiVenue ? 'Multi-venue event' : '')
       
-      // Check for Ashwin in sound requirements
-      if (event.sound_requirements?.toLowerCase().includes('ashwin')) {
-        manualOnly = true
-        manualReason = manualReason ? manualReason + ', Ashwin involved' : 'Ashwin involved'
-      }
+      // No special-casing for any crew member name in sound requirements
+      // Assignment follows standard rules based on venue/vertical capabilities
       
       // Default crew count
       const defaultCrew = manualOnly ? 0 : (VENUE_DEFAULTS[venue] || 1)
@@ -834,7 +831,13 @@ app.get('/api/export/csv', async (c) => {
       return '"' + val + '"'
     }
     
-    csv += `${e.event_date},${escapeField(e.name)},${escapeField(e.venue)},${escapeField(e.team)},${escapeField(e.sound_requirements)},${escapeField(e.call_time)},${escapeField(crewList)}\n`
+    // Convert yyyy-mm-dd to dd-mm-yyyy for output
+    let dateOut = e.event_date
+    if (dateOut && dateOut.match(/^\\d{4}-\\d{2}-\\d{2}$/)) {
+      const [yyyy, mm, dd] = dateOut.split('-')
+      dateOut = dd + '-' + mm + '-' + yyyy
+    }
+    csv += `${dateOut},${escapeField(e.name)},${escapeField(e.venue)},${escapeField(e.team)},${escapeField(e.sound_requirements)},${escapeField(e.call_time)},${escapeField(crewList)}\n`
   }
   
   return new Response(csv, {
@@ -1029,7 +1032,7 @@ app.get('/', (c) => {
           <div id="upload-zone" class="upload-zone p-12 text-center cursor-pointer">
             <i class="fas fa-cloud-upload-alt text-4xl text-blue-400 mb-4"></i>
             <p class="text-lg mb-2">Drop CSV file here or click to browse</p>
-            <p class="text-muted text-sm">Format: Date, Program, Venue, Team, Sound Requirements, Call Time, Crew</p>
+            <p class="text-muted text-sm">Format: Date (dd-mm-yyyy), Program, Venue, Team, Sound Requirements, Call Time, Crew</p>
             <input type="file" id="csv-input" accept=".csv" class="hidden">
           </div>
           <div id="upload-preview" class="hidden mt-6">
@@ -1114,6 +1117,18 @@ app.get('/', (c) => {
             <button id="modal-close" class="text-gray-400 hover:text-white"><i class="fas fa-times text-xl"></i></button>
           </div>
           <div class="space-y-4">
+            <div id="modal-venue-section" class="hidden">
+              <label class="block text-sm font-medium mb-2">Venue <span class="manual-badge ml-2">Multi-venue</span></label>
+              <select id="modal-venue" class="w-full py-3">
+                <option value="JBT">JBT (Jamshed Bhabha Theatre)</option>
+                <option value="Tata">TT (Tata Theatre)</option>
+                <option value="Experimental">TET (Experimental Theatre)</option>
+                <option value="Godrej Dance">GDT (Godrej Dance Theatre)</option>
+                <option value="Little Theatre">LT (Little Theatre)</option>
+                <option value="Others">Others</option>
+              </select>
+              <p class="text-muted text-xs mt-1">Select primary venue for crew assignment rules</p>
+            </div>
             <div>
               <label class="block text-sm font-medium mb-2">FOH Engineer</label>
               <select id="modal-foh" class="w-full py-3"></select>
@@ -1256,18 +1271,36 @@ app.get('/', (c) => {
       }
       
       function handleFileUpload(file) {
+        // Show upload progress
+        const uploadZone = document.getElementById('upload-zone');
+        uploadZone.innerHTML = '<div class="text-center"><div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400 mx-auto mb-4"></div><p class="text-lg">Reading CSV file...</p><p class="text-muted text-sm" id="upload-progress">0%</p></div>';
+        
         const reader = new FileReader();
+        reader.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 50);
+            document.getElementById('upload-progress').textContent = pct + '% - Reading file';
+          }
+        };
         reader.onload = async (e) => {
+          document.getElementById('upload-progress').textContent = '50% - Parsing events';
           const text = e.target.result;
           const lines = text.split(new RegExp('\\r?\\n')).filter(l => l.trim());
           const events = [];
           rawEventData = [];
           
+          const totalLines = lines.length - 1;
           for (let i = 1; i < lines.length; i++) {
             const parts = parseCSVLine(lines[i]);
             if (parts.length >= 4) {
+              let dateStr = parts[0]?.trim() || '';
+              // Convert dd-mm-yyyy to yyyy-mm-dd for storage
+              if (dateStr.match(/^\d{2}-\d{2}-\d{4}$/)) {
+                const [dd, mm, yyyy] = dateStr.split('-');
+                dateStr = yyyy + '-' + mm + '-' + dd;
+              }
               const evt = {
-                date: parts[0]?.trim() || '',
+                date: dateStr,
                 name: parts[1]?.trim() || '',
                 venue: parts[2]?.trim() || '',
                 team: parts[3]?.trim() || '',
@@ -1279,12 +1312,23 @@ app.get('/', (c) => {
                 rawEventData.push(evt);
               }
             }
+            if (i % 10 === 0) {
+              const pct = 50 + Math.round((i / totalLines) * 25);
+              document.getElementById('upload-progress').textContent = pct + '% - Parsed ' + i + '/' + totalLines + ' events';
+            }
           }
           
+          document.getElementById('upload-progress').textContent = '75% - Uploading to server';
           const res = await fetch('/api/events/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ events }) });
+          document.getElementById('upload-progress').textContent = '90% - Processing response';
           const data = await res.json();
           batchId = data.batch_id;
           uploadedEvents = data.events;
+          
+          // Restore upload zone
+          uploadZone.innerHTML = '<i class="fas fa-cloud-upload-alt text-4xl text-blue-400 mb-4"></i><p class="text-lg mb-2">Drop CSV file here or click to browse</p><p class="text-muted text-sm">Format: Date (dd-mm-yyyy), Program, Venue, Team, Sound Requirements, Call Time, Crew</p><input type="file" id="csv-input" accept=".csv" class="hidden">';
+          document.getElementById('csv-input').addEventListener('change', (ev) => { if (ev.target.files.length > 0) handleFileUpload(ev.target.files[0]); });
+          
           renderUploadPreview();
         };
         reader.readAsText(file);
@@ -1354,21 +1398,12 @@ app.get('/', (c) => {
           html += '<td class="py-3">' + e.name.substring(0, 35) + (e.name.length > 35 ? '...' : '') + daysLabel + '</td>';
           html += '<td class="py-3">' + e.venue + '</td>';
           html += '<td class="py-3">';
-          if (e.needs_manual_review) {
-            html += '<select class="stage-select w-16" data-group="' + key + '" data-event-ids="' + group.events.map(ev => ev.id).join(',') + '">';
-            for (let i = 0; i <= 5; i++) {
-              const selected = i === e.stage_crew_needed ? 'selected' : '';
-              html += '<option value="' + i + '" ' + selected + '>' + i + '</option>';
-            }
-            html += '</select>';
-          } else {
-            html += '<select class="stage-select w-16" data-group="' + key + '" data-event-ids="' + group.events.map(ev => ev.id).join(',') + '">';
-            for (let i = 1; i <= 5; i++) {
-              const selected = i === e.stage_crew_needed ? 'selected' : '';
-              html += '<option value="' + i + '" ' + selected + '>' + i + '</option>';
-            }
-            html += '</select>';
+          html += '<select class="stage-select w-16" data-group="' + key + '" data-event-ids="' + group.events.map(ev => ev.id).join(',') + '">';
+          for (let i = 0; i <= 5; i++) {
+            const selected = i === e.stage_crew_needed ? 'selected' : '';
+            html += '<option value="' + i + '" ' + selected + '>' + i + '</option>';
           }
+          html += '</select>';
           html += '</td>';
           html += '<td class="py-3">' + manualBadge + '</td>';
           html += '</tr>';
@@ -1390,10 +1425,40 @@ app.get('/', (c) => {
       }
       
       async function runAssignmentEngine() {
+        // Show progress
+        const btn = document.getElementById('step3-run');
+        const originalText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<div class="flex items-center"><div class="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>Running engine...</div>';
+        
+        // Progress overlay
+        const reqContainer = document.getElementById('stage-requirements');
+        const progressHtml = '<div class="flex flex-col items-center justify-center py-8"><div class="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-400 mb-4"></div><p class="text-lg font-medium" id="engine-progress">Initializing assignment engine...</p><p class="text-muted text-sm mt-2">Processing ' + uploadedEvents.length + ' events</p></div>';
+        const savedContent = reqContainer.innerHTML;
+        reqContainer.innerHTML = progressHtml;
+        
+        // Simulate progress updates
+        const steps = ['Loading crew data...', 'Checking availability...', 'Running FOH assignments...', 'Running Stage assignments...', 'Finalizing...'];
+        let stepIdx = 0;
+        const progressInterval = setInterval(() => {
+          if (stepIdx < steps.length) {
+            document.getElementById('engine-progress').textContent = steps[stepIdx];
+            stepIdx++;
+          }
+        }, 400);
+        
         const res = await fetch('/api/assignments/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ batch_id: batchId }) });
+        clearInterval(progressInterval);
+        
         const data = await res.json();
         assignments = data.assignments;
         conflicts = data.conflicts;
+        
+        // Restore button
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        reqContainer.innerHTML = savedContent;
+        
         renderAssignments();
         goToStep(4);
       }
@@ -1455,6 +1520,16 @@ app.get('/', (c) => {
         
         document.getElementById('modal-title').textContent = a.event_name.substring(0, 50);
         document.getElementById('modal-subtitle').textContent = a.venue + ' | ' + a.vertical + ' | ' + a.event_date;
+        
+        // Show venue dropdown for multi-venue events
+        const venueSection = document.getElementById('modal-venue-section');
+        const isMultiVenue = a.manual_flag_reason && a.manual_flag_reason.includes('Multi-venue');
+        if (isMultiVenue) {
+          venueSection.classList.remove('hidden');
+          document.getElementById('modal-venue').value = a.venue_normalized || 'Others';
+        } else {
+          venueSection.classList.add('hidden');
+        }
         const needed = uploadedEvents.find(e => e.id === eventId)?.stage_crew_needed || 1;
         document.getElementById('modal-stage-count').textContent = '(total crew: ' + needed + ')';
         
