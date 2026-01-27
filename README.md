@@ -2,42 +2,54 @@
 
 **Bulk Assignment Co-Pilot for Sound Crew Scheduling**
 
-A full-stack web application that automates crew assignments for NCPA (National Centre for the Performing Arts) sound department events. The system applies intelligent rules based on crew capabilities, venue requirements, and vertical specializations while maintaining even workload distribution.
+A full-stack web application that automates crew assignments for NCPA (National Centre for the Performing Arts) sound department events. Integrates directly with the existing ncpa-sound.pages.dev scheduler - upload your monthly events CSV, get intelligent crew assignments, and export back for import.
 
 ## 🌐 URLs
 
 - **Development**: https://3000-iwubkjnli1k5cluc5mwux-b9b802c4.sandbox.novita.ai
 - **Production**: *(Deploy with `npm run deploy`)*
+- **Integration**: Exports compatible with ncpa-sound.pages.dev
 
 ## ✅ Completed Features
 
 ### Core Functionality
 1. **5-Step Workflow**
    - Step 1: Crew day-offs calendar with weekend marking
-   - Step 2: CSV event upload with multi-day detection
-   - Step 3: Stage crew requirements quick-entry
+   - Step 2: CSV event upload with automatic venue/team mapping
+   - Step 3: Crew requirements quick-entry (defaults by venue)
    - Step 4: Review & edit assignments with conflict resolution
-   - Step 5: Export (CSV, Calendar, Workload report)
+   - Step 5: Export (NCPA format CSV, Calendar, Workload report)
 
-2. **Assignment Engine**
-   - Priority tiers: Senior + Specialist → Senior + Capable → Mid + Specialist → Mid + Capable → Junior → Outside Crew
-   - Same-month workload balancing
+2. **Intelligent Parsing (Real NCPA Format)**
+   - **Input**: `Date, Program, Venue, Team, Sound Requirements, Call Time, Crew`
+   - **Output**: Same format with Crew column populated
+   - **Venue Mapping**: JBT, TT→Tata, TET→Experimental, GDT→Godrej Dance, LT→Little Theatre
+   - **Team→Vertical**: Dr.Rao/Team→Indian Music, Farrahnaz→Intl Music, etc.
+   - **Manual Flags**: Multi-venue, DPAG, Stuart Liff events flagged for manual decision
+
+3. **Assignment Engine**
+   - Priority tiers: Senior + Specialist → Senior + Capable → Mid + Specialist → Mid + Capable → Junior → OC
+   - **Same-month** workload balancing (rotation within tiers)
    - Multi-day events get same crew throughout
    - 1 event per day per crew member (hard constraint)
    - Auto-assign Stage crew, flag FOH conflicts for manual resolution
 
-3. **Crew Capability Matrix**
-   - 12 crew members (4 Senior, 5 Mid, 2 Junior, 2 Hired)
-   - 6 venues: JBT, Tata, Experimental, Little Theatre, Godrej Dance, Others
-   - 8 verticals: Indian Music, Int'l Music, Western Music, Theatre, Corporate, Library, Dance, Others
-   - Specialist (Y*) and conditional (Exp only) capabilities
+4. **Crew Roster (13 members)**
+   - **Senior (4)**: Naren, Nikhil, Coni, Sandeep
+   - **Mid (5)**: Aditya, Viraj, NS, Nazar, Shridhar
+   - **Junior (2)**: Omkar, Akshay
+   - **Outside Crew (3)**: OC1, OC2, OC3 (Stage-only, last resort)
 
-4. **UI Features**
-   - Dark theme with glassmorphic design
-   - Click-to-toggle availability calendar
-   - Drag-and-drop CSV upload
-   - Inline editing with override warnings
-   - Responsive card-based layout
+5. **Venue Defaults**
+   - JBT/Tata: 3 crew (1 FOH + 2 Stage)
+   - Experimental: 2 crew
+   - Little Theatre/Godrej Dance/Others: 1 crew
+
+### Manual Review Flags
+Events automatically flagged for manual assignment:
+- **DPAG** (Dilip Piramal Art Gallery)
+- **Stuart Liff Library**
+- **Multi-venue events** (e.g., "TT TET GDT")
 
 ### API Endpoints
 | Endpoint | Method | Description |
@@ -47,11 +59,11 @@ A full-stack web application that automates crew assignments for NCPA (National 
 | `/api/unavailability/bulk` | POST | Bulk add/remove day-offs |
 | `/api/events/upload` | POST | Upload events from CSV |
 | `/api/events` | GET | List events by batch |
-| `/api/events/:id` | PUT | Update stage crew count |
+| `/api/events/:id` | PUT | Update crew count |
 | `/api/assignments/run` | POST | Run assignment engine |
 | `/api/assignments` | GET | Get assignments for batch |
 | `/api/assignments/:eventId` | PUT | Manual override |
-| `/api/export/csv` | GET | Download standard CSV |
+| `/api/export/csv` | GET | Download NCPA format CSV |
 | `/api/export/calendar` | GET | Download calendar format |
 | `/api/export/workload` | GET | Download workload report |
 
@@ -59,36 +71,40 @@ A full-stack web application that automates crew assignments for NCPA (National 
 
 ### Crew
 - Name, Level (Senior/Mid/Junior/Hired)
+- is_outside_crew flag (OC1, OC2, OC3)
 - Venue capabilities (JSON: Y/Y*/N per venue)
 - Vertical capabilities (JSON: Y/Y*/N/Exp only per vertical)
 - can_stage, stage_only_if_urgent flags
-- Special notes
 
 ### Events
-- Name, Date, Venue, Vertical
-- Stage crew needed (default: JBT/Tata=2, others=1)
+- Original CSV fields preserved: Program, Venue, Team, Sound Requirements, Call Time
+- venue_normalized (for rules engine)
+- vertical (derived from Team)
+- needs_manual_review, manual_flag_reason
 - Event group (for multi-day)
-- Batch ID
 
 ### Assignments
 - Event → Crew mapping
 - Role (FOH/Stage)
 - Manual override tracking
 
-### Workload History
-- Crew × Month → Assignment count
+## 📁 CSV Format
 
-## 📁 Input CSV Format
-
+**Input (from ncpa-sound.pages.dev):**
 ```csv
-Event Name,Date,Venue,Vertical
-Ravi Shankar Tribute,2026-02-12,JBT,Indian Music
-Jazz Night,2026-02-15,Tata,Intl Music
-Kathak Festival,2026-02-14,Experimental,Dance
-Kathak Festival,2026-02-15,Experimental,Dance
+Date,Program,Venue,Team,Sound Requirements,Call Time,Crew
+2026-02-01,Jazz Night Showcase,TT,Farrahnaz & Team,Check sound requirements,17:00,
+2026-02-02,Indian Classical Evening,JBT,Dr.Rao/Team,Full concert setup,18:00,
 ```
 
-**Multi-day events**: Same name = same crew for all dates.
+**Output (ready for import):**
+```csv
+Date,Program,Venue,Team,Sound Requirements,Call Time,Crew
+2026-02-01,Jazz Night Showcase,TT,Farrahnaz & Team,Check sound requirements,17:00,"Nikhil, NS, Akshay"
+2026-02-02,Indian Classical Evening,JBT,Dr.Rao/Team,Full concert setup,18:00,"Aditya, Viraj, Omkar"
+```
+
+**Multi-day events**: Same Program name = same crew for all dates.
 
 ## 🚀 Deployment
 
@@ -117,13 +133,25 @@ npm run deploy
 - **Cards**: Glass panels with backdrop blur
 - **Motion**: Subtle fade-ins, smooth transitions
 
+## 📝 Team→Vertical Mapping Reference
+
+| Team Field | Vertical |
+|------------|----------|
+| Dr.Rao/Team, Dr. Rao/Team | Indian Music |
+| Farrahnaz & Team, Farrahnaz | Intl Music |
+| Bianca/Team | Western Music |
+| Nooshin/Team, Bruce/* | Theatre |
+| Dr.Swapno/Team | Dance |
+| Dr.Sujata/Team, Dr.Cavas | Library |
+| Marketing | Corporate |
+| DP, PAG, Lit Live | Others |
+
 ## 🔮 Future Enhancements (Phase 2)
 
 - [ ] Learning from overrides (suggested vs final tracking)
 - [ ] Historical workload analytics
 - [ ] Crew skill progression tracking
-- [ ] Integration with Google Calendar API
-- [ ] Mobile-optimized view
+- [ ] Direct Google Calendar integration
 
 ## 📝 Tech Stack
 
