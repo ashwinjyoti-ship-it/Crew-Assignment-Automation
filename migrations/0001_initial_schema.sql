@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS crew (
     level TEXT NOT NULL CHECK (level IN ('Senior', 'Mid', 'Junior', 'Hired')),
     can_stage BOOLEAN DEFAULT 1,
     stage_only_if_urgent BOOLEAN DEFAULT 0,
+    is_outside_crew BOOLEAN DEFAULT 0,  -- True for OC1/OC2/OC3
     venue_capabilities TEXT NOT NULL,  -- JSON: {"JBT": "Y*", "Tata": "Y", ...}
     vertical_capabilities TEXT NOT NULL,  -- JSON: {"Indian Music": "Y", "Int'l Music": "Y*", ...}
     special_notes TEXT,
@@ -23,16 +24,22 @@ CREATE TABLE IF NOT EXISTS crew_unavailability (
     UNIQUE(crew_id, unavailable_date)
 );
 
--- Uploaded events
+-- Uploaded events (preserves original CSV fields)
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id TEXT NOT NULL,  -- Groups uploads together
-    name TEXT NOT NULL,
+    name TEXT NOT NULL,  -- Program field from CSV
     event_date TEXT NOT NULL,  -- 'YYYY-MM-DD'
-    venue TEXT NOT NULL,
-    vertical TEXT NOT NULL,
+    venue TEXT NOT NULL,  -- Original venue from CSV
+    venue_normalized TEXT NOT NULL,  -- Mapped venue for rules engine
+    team TEXT,  -- Original Team field (maps to vertical)
+    vertical TEXT NOT NULL,  -- Derived from Team field
+    sound_requirements TEXT,  -- Preserved from original CSV
+    call_time TEXT,  -- Preserved from original CSV
     stage_crew_needed INTEGER DEFAULT 1,
     event_group TEXT,  -- For multi-day events (hash of name)
+    needs_manual_review BOOLEAN DEFAULT 0,  -- Flag for multi-venue, DPAG, etc.
+    manual_flag_reason TEXT,  -- Why flagged
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
