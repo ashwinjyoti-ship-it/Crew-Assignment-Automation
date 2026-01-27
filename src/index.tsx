@@ -654,6 +654,8 @@ app.post('/api/assignments/run', async (c) => {
     }
     
     // ========== STAGE ASSIGNMENT (3-month workload balancing) ==========
+    // Key principle: Workload is PRIMARY driver - everyone shares Stage work fairly
+    // Seniors do Stage when their total workload is lower than others
     const stageNeeded = event.stage_crew_needed - 1  // -1 because total includes FOH
     if (stageNeeded > 0) {
       const stageCandidates: { crew: CrewMember, score: number }[] = []
@@ -663,11 +665,20 @@ app.post('/api/assignments/run', async (c) => {
         if (c.id === eventAssignment.foh) continue
         if (!isAvailable(c.id)) continue
         
-        // Score: prefer lower levels for stage, use 3-month workload
+        // Score: WORKLOAD is the primary factor for fair distribution
+        // Lower workload = higher score = more likely to be assigned
         const workload = workload3Month[c.id] || 0
-        let score = (3 - LEVEL_ORDER[c.level]) * 50  // Senior=150, Mid=100, Junior=50, Hired=0
-        if (c.stage_only_if_urgent) score -= 200  // Seniors prefer FOH
-        score -= workload * 5  // 3-month workload penalty
+        
+        // Start with base score, subtract workload heavily
+        // This ensures lowest-workload crew gets picked regardless of level
+        let score = 500 - (workload * 20)  // Workload dominates
+        
+        // Small bonus for non-seniors to slightly prefer them when workload is equal
+        // But this is overridden if a senior has significantly lower workload
+        if (!c.stage_only_if_urgent) score += 10  // Slight preference for non-seniors
+        
+        // Outside crew only when internal exhausted (big penalty)
+        if (c.level === 'Hired') score -= 300
         
         stageCandidates.push({ crew: c, score })
       }
