@@ -416,17 +416,56 @@ app.post('/api/assignments/run', async (c) => {
     vertical_capabilities: JSON.parse(c.vertical_capabilities)
   })) as CrewMember[]
   
-  // Get month for workload
-  const month = events[0]?.event_date?.substring(0, 7) || new Date().toISOString().substring(0, 7)
+  // Get current month for specialist rotation
+  const currentMonth = events[0]?.event_date?.substring(0, 7) || new Date().toISOString().substring(0, 7)
   
-  // Get current workload
-  const workloadResult = await DB.prepare(
-    'SELECT crew_id, assignment_count FROM workload_history WHERE month = ?'
-  ).bind(month).all()
-  const workloadMap: Record<number, number> = {}
-  for (const w of workloadResult.results as any[]) {
-    workloadMap[w.crew_id] = w.assignment_count
+  // ========== TWO-TIER WORKLOAD SYSTEM ==========
+  
+  // 1. Get 3-month rolling workload for OVERALL balancing
+  const [year, monthNum] = currentMonth.split('-').map(Number)
+  const threeMonthsAgo = new Date(year, monthNum - 4, 1)  // 3 months back
+  const threeMonthStart = `${threeMonthsAgo.getFullYear()}-${String(threeMonthsAgo.getMonth() + 1).padStart(2, '0')}`
+  
+  const workload3MonthResult = await DB.prepare(
+    `SELECT crew_id, SUM(assignment_count) as total FROM workload_history 
+     WHERE month >= ? AND month <= ? GROUP BY crew_id`
+  ).bind(threeMonthStart, currentMonth).all()
+  
+  const workload3Month: Record<number, number> = {}
+  for (const w of workload3MonthResult.results as any[]) {
+    workload3Month[w.crew_id] = w.total
   }
+  
+  // 2. Track same-month specialist rotation per vertical (for FOH specialist cycling)
+  // Key: vertical name, Value: array of specialist crew IDs in rotation order
+  const verticalSpecialistRotation: Record<string, number[]> = {}
+  const verticalRotationIndex: Record<string, number> = {}  // Current index in rotation
+  
+  // Build specialist lists per vertical
+  for (const c of crew) {
+    if (c.level === 'Hired') continue
+    for (const [vertical, cap] of Object.entries(c.vertical_capabilities)) {
+      if (cap === 'Y*') {
+        if (!verticalSpecialistRotation[vertical]) {
+          verticalSpecialistRotation[vertical] = []
+          verticalRotationIndex[vertical] = 0
+        }
+        verticalSpecialistRotation[vertical].push(c.id)
+      }
+    }
+  }
+  
+  // Sort specialists by level (Senior first, then Mid) for initial order
+  for (const vertical of Object.keys(verticalSpecialistRotation)) {
+    verticalSpecialistRotation[vertical].sort((a, b) => {
+      const crewA = crew.find(c => c.id === a)!
+      const crewB = crew.find(c => c.id === b)!
+      return LEVEL_ORDER[crewA.level] - LEVEL_ORDER[crewB.level]
+    })
+  }
+  
+  // Track current month workload (for updating at end)
+  const currentMonthWorkload: Record<number, number> = {}
   
   // Get unavailability
   const unavailResult = await DB.prepare('SELECT crew_id, unavailable_date FROM crew_unavailability').all()
@@ -463,8 +502,8 @@ app.post('/api/assignments/run', async (c) => {
       event_id: event.id,
       event_name: event.name,
       event_date: event.event_date,
-      venue: event.venue,  // Original venue for display/export
-      venue_normalized: event.venue_normalized,  // For rules
+      venue: event.venue,
+      venue_normalized: event.venue_normalized,
       team: event.team,
       vertical: event.vertical,
       sound_requirements: event.sound_requirements,
@@ -499,7 +538,7 @@ app.post('/api/assignments/run', async (c) => {
       const groupEvents = events.filter(e => e.event_group === event.event_group)
       eventDates = groupEvents.map(e => e.event_date)
       
-      // Reuse existing assignments
+      // Reuse existing assignments for multi-day
       if (multiDayAssignments[event.event_group]) {
         const existing = multiDayAssignments[event.event_group]
         eventAssignment.foh = existing.foh
@@ -532,39 +571,78 @@ app.post('/api/assignments/run', async (c) => {
       return true
     }
     
-    // ========== FOH ASSIGNMENT ==========
-    const fohCandidates: { crew: CrewMember, score: number, isSpecialist: boolean }[] = []
+    // ========== FOH ASSIGNMENT (Two-tier workload) ==========
+    let selectedFOH: CrewMember | null = null
+    let isSpecialistAssignment = false
     
-    for (const c of crew) {
-      if (c.level === 'Hired') continue
-      if (!isAvailable(c.id)) continue
+    // Get specialists for this vertical
+    const specialistIds = verticalSpecialistRotation[event.vertical] || []
+    const availableSpecialists = specialistIds.filter(id => {
+      const c = crew.find(cr => cr.id === id)!
+      if (!isAvailable(id)) return false
+      const venueCapability = c.venue_capabilities[event.venue_normalized]
+      return venueCapability && venueCapability !== 'N'
+    })
+    
+    // Try specialist rotation first (same-month cycling)
+    if (availableSpecialists.length > 0) {
+      // Get current rotation index for this vertical
+      const rotationIdx = verticalRotationIndex[event.vertical] || 0
       
-      const capability = canDoFOH(c, event.venue_normalized, event.vertical)
-      if (!capability.can) continue
-      
-      const workload = workloadMap[c.id] || 0
-      let score = (3 - LEVEL_ORDER[c.level]) * 100
-      if (capability.isSpecialist) score += 50
-      score -= workload * 10
-      
-      fohCandidates.push({ crew: c, score, isSpecialist: capability.isSpecialist })
+      // Find next available specialist in rotation
+      for (let i = 0; i < availableSpecialists.length; i++) {
+        const idx = (rotationIdx + i) % availableSpecialists.length
+        const candidateId = availableSpecialists[idx]
+        const candidate = crew.find(c => c.id === candidateId)!
+        
+        selectedFOH = candidate
+        isSpecialistAssignment = true
+        
+        // Advance rotation index for next specialist event of same vertical
+        verticalRotationIndex[event.vertical] = (idx + 1) % availableSpecialists.length
+        break
+      }
     }
     
-    fohCandidates.sort((a, b) => b.score - a.score)
+    // If no specialist available, fall back to capable crew (use 3-month workload)
+    if (!selectedFOH) {
+      const capableCandidates: { crew: CrewMember, score: number }[] = []
+      
+      for (const c of crew) {
+        if (c.level === 'Hired') continue
+        if (!isAvailable(c.id)) continue
+        
+        const capability = canDoFOH(c, event.venue_normalized, event.vertical)
+        if (!capability.can) continue
+        
+        // Score based on seniority and 3-month workload
+        const workload = workload3Month[c.id] || 0
+        let score = (3 - LEVEL_ORDER[c.level]) * 100  // Senior=300, Mid=200, Junior=100
+        score -= workload * 5  // Penalize based on 3-month history
+        
+        capableCandidates.push({ crew: c, score })
+      }
+      
+      capableCandidates.sort((a, b) => b.score - a.score)
+      
+      if (capableCandidates.length > 0) {
+        selectedFOH = capableCandidates[0].crew
+      }
+    }
     
-    if (fohCandidates.length > 0) {
-      const selected = fohCandidates[0].crew
-      eventAssignment.foh = selected.id
-      eventAssignment.foh_name = selected.name
-      eventAssignment.foh_level = selected.level
-      eventAssignment.foh_specialist = fohCandidates[0].isSpecialist
+    if (selectedFOH) {
+      eventAssignment.foh = selectedFOH.id
+      eventAssignment.foh_name = selectedFOH.name
+      eventAssignment.foh_level = selectedFOH.level
+      eventAssignment.foh_specialist = isSpecialistAssignment
       
       for (const date of eventDates) {
-        dailyAssignments[date].add(selected.id)
+        dailyAssignments[date].add(selectedFOH.id)
       }
-      workloadMap[selected.id] = (workloadMap[selected.id] || 0) + eventDates.length
+      currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + eventDates.length
+      workload3Month[selectedFOH.id] = (workload3Month[selectedFOH.id] || 0) + eventDates.length
       
-      await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selected.id, 'FOH').run()
+      await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
     } else {
       eventAssignment.foh_conflict = true
       conflicts.push({
@@ -575,24 +653,21 @@ app.post('/api/assignments/run', async (c) => {
       })
     }
     
-    // ========== STAGE ASSIGNMENT ==========
-    const stageNeeded = event.stage_crew_needed - 1 // -1 because total includes FOH
+    // ========== STAGE ASSIGNMENT (3-month workload balancing) ==========
+    const stageNeeded = event.stage_crew_needed - 1  // -1 because total includes FOH
     if (stageNeeded > 0) {
       const stageCandidates: { crew: CrewMember, score: number }[] = []
-      
-      // Get hired crew for OC naming
-      const hiredCrew = crew.filter(c => c.level === 'Hired')
-      let ocIndex = 0
       
       for (const c of crew) {
         if (!c.can_stage) continue
         if (c.id === eventAssignment.foh) continue
         if (!isAvailable(c.id)) continue
         
-        const workload = workloadMap[c.id] || 0
-        let score = (3 - LEVEL_ORDER[c.level]) * 50
-        if (c.stage_only_if_urgent) score -= 200
-        score -= workload * 10
+        // Score: prefer lower levels for stage, use 3-month workload
+        const workload = workload3Month[c.id] || 0
+        let score = (3 - LEVEL_ORDER[c.level]) * 50  // Senior=150, Mid=100, Junior=50, Hired=0
+        if (c.stage_only_if_urgent) score -= 200  // Seniors prefer FOH
+        score -= workload * 5  // 3-month workload penalty
         
         stageCandidates.push({ crew: c, score })
       }
@@ -605,19 +680,13 @@ app.post('/api/assignments/run', async (c) => {
       for (let i = 0; i < Math.min(stageNeeded, stageCandidates.length); i++) {
         const stageCrew = stageCandidates[i].crew
         selectedStage.push(stageCrew.id)
-        
-        // Name OC1, OC2, OC3 for hired crew
-        if (stageCrew.level === 'Hired') {
-          ocIndex++
-          stageNames.push(`OC${ocIndex}`)
-        } else {
-          stageNames.push(stageCrew.name)
-        }
+        stageNames.push(stageCrew.name)
         
         for (const date of eventDates) {
           dailyAssignments[date].add(stageCrew.id)
         }
-        workloadMap[stageCrew.id] = (workloadMap[stageCrew.id] || 0) + eventDates.length
+        currentMonthWorkload[stageCrew.id] = (currentMonthWorkload[stageCrew.id] || 0) + eventDates.length
+        workload3Month[stageCrew.id] = (workload3Month[stageCrew.id] || 0) + eventDates.length
         
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, stageCrew.id, 'Stage').run()
       }
@@ -647,12 +716,12 @@ app.post('/api/assignments/run', async (c) => {
     assignments.push(eventAssignment)
   }
   
-  // Update workload history
-  for (const [crewId, count] of Object.entries(workloadMap)) {
+  // Update current month workload history
+  for (const [crewId, count] of Object.entries(currentMonthWorkload)) {
     await DB.prepare(
       `INSERT INTO workload_history (crew_id, month, assignment_count) VALUES (?, ?, ?)
-       ON CONFLICT(crew_id, month) DO UPDATE SET assignment_count = ?`
-    ).bind(parseInt(crewId), month, count, count).run()
+       ON CONFLICT(crew_id, month) DO UPDATE SET assignment_count = assignment_count + ?`
+    ).bind(parseInt(crewId), currentMonth, count, count).run()
   }
   
   return c.json({ assignments, conflicts })
