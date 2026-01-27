@@ -1259,7 +1259,7 @@ app.get('/', (c) => {
         const reader = new FileReader();
         reader.onload = async (e) => {
           const text = e.target.result;
-          const lines = text.split(/\r?\n/).filter(l => l.trim());
+          const lines = text.split(new RegExp('\\r?\\n')).filter(l => l.trim());
           const events = [];
           rawEventData = [];
           
