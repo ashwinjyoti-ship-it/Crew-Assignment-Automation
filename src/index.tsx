@@ -833,7 +833,7 @@ app.get('/api/export/csv', async (c) => {
     
     // Convert yyyy-mm-dd to dd-mm-yyyy for output
     let dateOut = e.event_date
-    if (dateOut && dateOut.match(/^\\d{4}-\\d{2}-\\d{2}$/)) {
+    if (dateOut && /^\d{4}-\d{2}-\d{2}$/.test(dateOut)) {
       const [yyyy, mm, dd] = dateOut.split('-')
       dateOut = dd + '-' + mm + '-' + yyyy
     }
@@ -883,6 +883,15 @@ app.get('/api/export/calendar', async (c) => {
     eventGroups[key].push(e)
   }
   
+  // Helper to convert yyyy-mm-dd to dd-mm-yyyy
+  const formatDate = (d: string) => {
+    if (d && d.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      const [yyyy, mm, dd] = d.split('-')
+      return `${dd}-${mm}-${yyyy}`
+    }
+    return d
+  }
+  
   let csv = 'Subject,Start Date,End Date,Description\n'
   for (const [, groupEvents] of Object.entries(eventGroups)) {
     groupEvents.sort((a, b) => a.event_date.localeCompare(b.event_date))
@@ -890,7 +899,7 @@ app.get('/api/export/calendar', async (c) => {
     const last = groupEvents[groupEvents.length - 1]
     const a = assignmentMap[first.id] || { foh: '', stage: [] }
     const desc = `Venue: ${first.venue} | Team: ${first.team} | FOH: ${a.foh} | Stage: ${a.stage.join(', ')}`
-    csv += `"${first.name}","${first.event_date}","${last.event_date}","${desc.replace(/"/g, '""')}"\n`
+    csv += `"${first.name}","${formatDate(first.event_date)}","${formatDate(last.event_date)}","${desc.replace(/"/g, '""')}"\n`
   }
   
   return new Response(csv, {
@@ -1158,6 +1167,16 @@ app.get('/', (c) => {
       let assignments = [];
       let conflicts = [];
       
+      // Helper: Convert yyyy-mm-dd to dd-mm-yyyy for display
+      function formatDateDisplay(dateStr) {
+        if (!dateStr) return '';
+        if (dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          const [yyyy, mm, dd] = dateStr.split('-');
+          return dd + '-' + mm + '-' + yyyy;
+        }
+        return dateStr;
+      }
+      
       async function init() {
         await loadCrew();
         renderAvailabilityGrid();
@@ -1372,7 +1391,7 @@ app.get('/', (c) => {
           if (shown.has(key)) continue;
           shown.add(key);
           const group = groups[key];
-          const dateDisplay = group.length > 1 ? e.event_date + ' <span class="text-blue-400">(' + group.length + 'd)</span>' : e.event_date;
+          const dateDisplay = group.length > 1 ? formatDateDisplay(e.event_date) + ' <span class="text-blue-400">(' + group.length + 'd)</span>' : formatDateDisplay(e.event_date);
           const manualBadge = e.needs_manual_review ? '<span class="manual-badge ml-2">' + e.manual_flag_reason + '</span>' : '';
           html += '<tr class="border-t border-white/5"><td class="py-2">' + e.name.substring(0, 40) + (e.name.length > 40 ? '...' : '') + '</td><td class="py-2">' + dateDisplay + '</td><td class="py-2">' + e.venue + '</td><td class="py-2">' + e.vertical + manualBadge + '</td></tr>';
         }
@@ -1503,7 +1522,7 @@ app.get('/', (c) => {
           
           html += '<tr class="border-t border-white/5">';
           html += '<td class="py-3">' + a.event_name.substring(0, 30) + (a.event_name.length > 30 ? '...' : '') + '</td>';
-          html += '<td class="py-3">' + a.event_date + '</td>';
+          html += '<td class="py-3">' + formatDateDisplay(a.event_date) + '</td>';
           html += '<td class="py-3">' + a.venue + '</td>';
           html += '<td class="py-3">' + crewDisplay + '</td>';
           html += '<td class="py-3"><button class="text-blue-400 hover:text-blue-300 edit-btn" data-event-id="' + a.event_id + '"><i class="fas fa-edit"></i></button></td>';
@@ -1519,7 +1538,7 @@ app.get('/', (c) => {
         if (!a) return;
         
         document.getElementById('modal-title').textContent = a.event_name.substring(0, 50);
-        document.getElementById('modal-subtitle').textContent = a.venue + ' | ' + a.vertical + ' | ' + a.event_date;
+        document.getElementById('modal-subtitle').textContent = a.venue + ' | ' + a.vertical + ' | ' + formatDateDisplay(a.event_date);
         
         // Show venue dropdown for multi-venue events
         const venueSection = document.getElementById('modal-venue-section');
