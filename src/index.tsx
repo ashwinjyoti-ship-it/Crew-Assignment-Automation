@@ -1347,6 +1347,13 @@ app.get('/', (c) => {
           batchId = data.batch_id;
           uploadedEvents = data.events;
           
+          // Sort events chronologically by date, then by name
+          uploadedEvents.sort((a, b) => {
+            const dateCompare = a.event_date.localeCompare(b.event_date);
+            if (dateCompare !== 0) return dateCompare;
+            return a.name.localeCompare(b.name);
+          });
+          
           // Restore upload zone
           uploadZone.innerHTML = '<i class="fas fa-cloud-upload-alt text-4xl text-blue-400 mb-4"></i><p class="text-lg mb-2">Drop CSV file here or click to browse</p><p class="text-muted text-sm">Format: Date (dd-mm-yyyy), Program, Venue, Team, Sound Requirements, Call Time, Crew</p><input type="file" id="csv-input" accept=".csv" class="hidden">';
           document.getElementById('csv-input').addEventListener('change', (ev) => { if (ev.target.files.length > 0) handleFileUpload(ev.target.files[0]); });
@@ -1504,6 +1511,13 @@ app.get('/', (c) => {
         const data = await res.json();
         assignments = data.assignments;
         conflicts = data.conflicts;
+        
+        // Sort assignments chronologically by date, then by name
+        assignments.sort((a, b) => {
+          const dateCompare = a.event_date.localeCompare(b.event_date);
+          if (dateCompare !== 0) return dateCompare;
+          return a.event_name.localeCompare(b.event_name);
+        });
         
         // Restore button
         btn.disabled = false;
