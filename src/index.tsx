@@ -1425,14 +1425,21 @@ app.get('/', (c) => {
         
         let html = '<table class="w-full text-sm"><thead><tr class="text-muted"><th class="text-left py-2">Event</th><th class="text-left py-2">Date</th><th class="text-left py-2">Venue</th><th class="text-left py-2">Team→Vertical</th><th class="py-2"></th></tr></thead><tbody>';
         const shown = new Set();
+        let lastDate = '';
         for (const e of uploadedEvents) {
           const key = e.event_group || e.id;
           if (shown.has(key)) continue;
           shown.add(key);
           const group = groups[key];
+          
+          // Add date divider line when date changes
+          const currentDate = e.event_date;
+          const borderClass = lastDate && lastDate !== currentDate ? 'border-t-2 border-blue-500/30' : 'border-t border-white/5';
+          lastDate = currentDate;
+          
           const dateDisplay = group.length > 1 ? formatDateDisplay(e.event_date) + ' <span class="text-blue-400">(' + group.length + 'd)</span>' : formatDateDisplay(e.event_date);
           const manualBadge = e.needs_manual_review ? '<span class="manual-badge ml-2">' + e.manual_flag_reason + '</span>' : '';
-          html += '<tr class="border-t border-white/5"><td class="py-2">' + e.name.substring(0, 40) + (e.name.length > 40 ? '...' : '') + '</td><td class="py-2">' + dateDisplay + '</td><td class="py-2">' + e.venue + '</td><td class="py-2">' + e.vertical + manualBadge + '</td></tr>';
+          html += '<tr class="' + borderClass + '"><td class="py-2">' + e.name.substring(0, 40) + (e.name.length > 40 ? '...' : '') + '</td><td class="py-2">' + dateDisplay + '</td><td class="py-2">' + e.venue + '</td><td class="py-2">' + e.vertical + manualBadge + '</td></tr>';
         }
         html += '</tbody></table>';
         document.getElementById('preview-table').innerHTML = html;
@@ -1560,13 +1567,19 @@ app.get('/', (c) => {
         }
         
         let html = '<table class="w-full text-sm"><thead><tr class="text-muted"><th class="text-left py-2">Event</th><th class="text-left py-2">Date</th><th class="text-left py-2">Venue</th><th class="text-left py-2">Crew</th><th class="py-2"></th></tr></thead><tbody>';
+        let lastDate = '';
         for (const a of assignments) {
           const crewList = [a.foh_name, ...(a.stage_names || [])].filter(Boolean).join(', ');
           let crewDisplay = crewList || '<span class="conflict-badge">Unassigned</span>';
           if (a.foh_specialist) crewDisplay = '<span class="specialist-badge mr-1">★</span>' + crewDisplay;
           if (a.needs_manual_review && !crewList) crewDisplay = '<span class="manual-badge">Manual</span>';
           
-          html += '<tr class="border-t border-white/5">';
+          // Add date divider line when date changes
+          const currentDate = a.event_date;
+          const borderClass = lastDate && lastDate !== currentDate ? 'border-t-2 border-blue-500/30' : 'border-t border-white/5';
+          lastDate = currentDate;
+          
+          html += '<tr class="' + borderClass + '">';
           html += '<td class="py-3">' + a.event_name.substring(0, 30) + (a.event_name.length > 30 ? '...' : '') + '</td>';
           html += '<td class="py-3">' + formatDateDisplay(a.event_date) + '</td>';
           html += '<td class="py-3">' + a.venue + '</td>';
