@@ -962,10 +962,10 @@ app.get('/', (c) => {
       .step-indicator { transition: all 0.3s ease; }
       .step-indicator.active { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); transform: scale(1.1); }
       .step-indicator.completed { background: #5eead4; }
-      .day-cell { width: 36px; height: 36px; border-radius: 10px; transition: all 0.2s ease; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 12px; }
-      .day-cell:hover { background: rgba(96,165,250,0.2); }
-      .day-cell.unavailable { background: rgba(248,113,113,0.3); color: #f87171; }
-      .day-cell.weekend { background: rgba(251,191,36,0.1); }
+      .day-cell { width: 36px; height: 36px; border-radius: 8px; transition: all 0.2s ease; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 12px; border: 1px solid rgba(255,255,255,0.06); }
+      .day-cell:hover { background: rgba(96,165,250,0.2); border-color: rgba(96,165,250,0.3); }
+      .day-cell.unavailable { background: rgba(248,113,113,0.3); color: #f87171; border-color: rgba(248,113,113,0.4); }
+      .day-cell.weekend { background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.15); }
       .upload-zone { border: 2px dashed rgba(96,165,250,0.3); border-radius: 16px; transition: all 0.3s ease; }
       .upload-zone:hover, .upload-zone.dragover { border-color: rgba(96,165,250,0.6); background: rgba(96,165,250,0.05); }
       .fade-in { animation: fadeIn 0.3s ease-out; }
@@ -1216,7 +1216,7 @@ app.get('/', (c) => {
         for (const c of crew) {
           if (c.level === 'Hired') continue;
           const levelColor = c.level === 'Senior' ? 'text-blue-400' : c.level === 'Mid' ? 'text-teal-400' : 'text-amber-400';
-          html += '<tr><td class="py-2 px-3 whitespace-nowrap sticky left-0 bg-gray-900/80"><span class="' + levelColor + ' text-xs mr-2">' + c.level.charAt(0) + '</span>' + c.name + '</td>';
+          html += '<tr class="border-b border-white/5 hover:bg-white/[0.02]"><td class="py-2 px-3 whitespace-nowrap sticky left-0 bg-gray-900/80 border-r border-white/10"><span class="' + levelColor + ' text-xs mr-2">' + c.level.charAt(0) + '</span>' + c.name + '</td>';
           for (let d = 1; d <= daysInMonth; d++) {
             const dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
             const date = new Date(year, month, d);
