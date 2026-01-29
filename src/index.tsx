@@ -944,7 +944,7 @@ app.get('/', (c) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NCPA Crew Assignment Helper</title>
+    <title>Assignment Automator</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet">
     <style>
@@ -989,9 +989,9 @@ app.get('/', (c) => {
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-semibold tracking-tight">
-              <i class="fas fa-sliders-h text-blue-400 mr-3"></i>NCPA Crew Assignment Helper
+              <i class="fas fa-sliders-h text-blue-400 mr-3"></i>Assignment Automator
             </h1>
-            <p class="text-muted text-sm mt-1">Bulk assignment co-pilot for sound crew scheduling</p>
+            <p class="text-muted text-sm mt-1">Sound Crew bulk assignment</p>
           </div>
           <div id="step-indicators" class="flex items-center gap-3">
             <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium active" data-step="1">1</div>
@@ -1170,9 +1170,10 @@ app.get('/', (c) => {
       // Helper: Convert yyyy-mm-dd to dd-mm-yyyy for display
       function formatDateDisplay(dateStr) {
         if (!dateStr) return '';
-        if (dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
-          const [yyyy, mm, dd] = dateStr.split('-');
-          return dd + '-' + mm + '-' + yyyy;
+        // Check for yyyy-mm-dd format (use test with explicit pattern)
+        const parts = dateStr.split('-');
+        if (parts.length === 3 && parts[0].length === 4 && parts[1].length === 2 && parts[2].length === 2) {
+          return parts[2] + '-' + parts[1] + '-' + parts[0];
         }
         return dateStr;
       }
