@@ -1027,9 +1027,10 @@ app.get('/', (c) => {
           </div>
           <div id="availability-grid" class="glass-card-light p-4 overflow-x-auto"></div>
           <div class="flex justify-between items-center mt-6">
-            <div class="flex items-center gap-4 text-sm text-muted">
+            <div class="flex items-center gap-6 text-sm text-muted">
               <span><span class="inline-block w-4 h-4 rounded bg-red-400/30 mr-2"></span>Day Off</span>
               <span><span class="inline-block w-4 h-4 rounded bg-amber-400/10 mr-2"></span>Weekend</span>
+              <span class="border-l border-white/20 pl-6">Crew: <span class="text-blue-400 ml-2">●</span> Senior <span class="text-teal-400 ml-2">●</span> Mid <span class="text-amber-400 ml-2">○</span> Junior</span>
             </div>
             <button id="step1-next" class="btn-primary px-6 py-3 rounded-xl font-medium">Continue <i class="fas fa-arrow-right ml-2"></i></button>
           </div>
@@ -1145,6 +1146,7 @@ app.get('/', (c) => {
             <div>
               <label class="block text-sm font-medium mb-2">Stage Crew <span id="modal-stage-count" class="text-muted"></span></label>
               <div id="modal-stage" class="glass-card-light p-3 max-h-48 overflow-y-auto space-y-2"></div>
+              <p class="text-muted text-xs mt-2"><span class="text-yellow-400">⭐</span> Specialist <span class="text-blue-400 ml-2">●</span> Senior <span class="text-teal-400 ml-2">●</span> Mid <span class="text-amber-400 ml-2">○</span> Junior <span class="ml-2">|</span> <span class="text-red-400 ml-2">Red</span> = busy <span class="text-gray-500 ml-2">Grey</span> = day off</p>
             </div>
           </div>
           <div class="flex justify-end gap-3 mt-6">
@@ -1216,7 +1218,7 @@ app.get('/', (c) => {
         for (const c of crew) {
           if (c.level === 'Hired') continue;
           const levelColor = c.level === 'Senior' ? 'text-blue-400' : c.level === 'Mid' ? 'text-teal-400' : 'text-amber-400';
-          html += '<tr class="border-b border-white/5 hover:bg-white/[0.02]"><td class="py-2 px-3 whitespace-nowrap sticky left-0 bg-gray-900/80 border-r border-white/10"><span class="' + levelColor + ' text-xs mr-2">' + c.level.charAt(0) + '</span>' + c.name + '</td>';
+          html += '<tr class="border-b border-white/5 hover:bg-white/[0.02]"><td class="py-2 px-3 whitespace-nowrap sticky left-0 bg-gray-900/80 border-r border-white/10"><span class="' + levelColor + ' mr-2">' + (c.level === 'Senior' ? '●' : c.level === 'Mid' ? '●' : '○') + '</span>' + c.name + '</td>';
           for (let d = 1; d <= daysInMonth; d++) {
             const dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
             const date = new Date(year, month, d);
@@ -1701,7 +1703,7 @@ app.get('/', (c) => {
           
           stageHtml += '<label class=\"flex items-center gap-2 cursor-pointer p-2 hover:bg-white/5 rounded-lg ' + labelClass + '\">';
           stageHtml += '<input type=\"checkbox\" class=\"stage-checkbox\" value=\"' + c.id + '\" ' + checked + ' data-busy=\"' + (isBusy ? isBusy.join(',') : '') + '\" data-dayoff=\"' + isDayOff + '\" ' + checkboxStyle + '>';
-          stageHtml += '<span class=\"' + levelColor + ' text-xs\">' + c.level.charAt(0) + '</span><span>' + c.name + '</span>' + suffix + '</label>';
+          stageHtml += '<span class=\"' + levelColor + '\">' + (c.level === 'Senior' ? '●' : c.level === 'Mid' ? '●' : '○') + '</span><span class=\"ml-1\">' + c.name + '</span>' + suffix + '</label>';
         }
         document.getElementById('modal-stage').innerHTML = stageHtml;
         document.getElementById('edit-modal').dataset.eventId = eventId;
