@@ -1304,27 +1304,29 @@ app.get('/', (c) => {
         reader.onload = async (e) => {
           document.getElementById('upload-progress').textContent = '50% - Parsing events';
           const text = e.target.result;
-          const lines = text.split(new RegExp('\\r?\\n')).filter(l => l.trim());
+          const rows = parseCSV(text);
           const events = [];
           rawEventData = [];
           
-          const totalLines = lines.length - 1;
-          for (let i = 1; i < lines.length; i++) {
-            const parts = parseCSVLine(lines[i]);
-            if (parts.length >= 4) {
-              let dateStr = parts[0]?.trim() || '';
+          // Skip header row
+          const totalRows = rows.length - 1;
+          for (let i = 1; i < rows.length; i++) {
+            const parts = rows[i];
+            if (parts.length >= 2) {
+              let dateStr = parts[0] || '';
               // Convert dd-mm-yyyy to yyyy-mm-dd for storage
               if (dateStr.match(/^\d{2}-\d{2}-\d{4}$/)) {
                 const [dd, mm, yyyy] = dateStr.split('-');
                 dateStr = yyyy + '-' + mm + '-' + dd;
               }
+              // Also handle yyyy-mm-dd (already correct format)
               const evt = {
                 date: dateStr,
-                name: parts[1]?.trim() || '',
-                venue: parts[2]?.trim() || '',
-                team: parts[3]?.trim() || '',
-                sound_requirements: parts[4]?.trim() || '',
-                call_time: parts[5]?.trim() || ''
+                name: parts[1] || '',
+                venue: parts[2] || '',
+                team: parts[3] || '',
+                sound_requirements: parts[4] || '',
+                call_time: parts[5] || ''
               };
               if (evt.date && evt.name) {
                 events.push(evt);
@@ -1332,8 +1334,8 @@ app.get('/', (c) => {
               }
             }
             if (i % 10 === 0) {
-              const pct = 50 + Math.round((i / totalLines) * 25);
-              document.getElementById('upload-progress').textContent = pct + '% - Parsed ' + i + '/' + totalLines + ' events';
+              const pct = 50 + Math.round((i / totalRows) * 25);
+              document.getElementById('upload-progress').textContent = pct + '% - Parsed ' + i + '/' + totalRows + ' events';
             }
           }
           
@@ -1353,18 +1355,45 @@ app.get('/', (c) => {
         reader.readAsText(file);
       }
       
-      function parseCSVLine(line) {
-        const result = [];
+      // Parse CSV with multi-line field support
+      function parseCSV(text) {
+        const rows = [];
         let current = '';
         let inQuotes = false;
-        for (let i = 0; i < line.length; i++) {
-          const char = line[i];
-          if (char === '"') inQuotes = !inQuotes;
-          else if (char === ',' && !inQuotes) { result.push(current); current = ''; }
-          else current += char;
+        let row = [];
+        
+        for (let i = 0; i < text.length; i++) {
+          const char = text[i];
+          const nextChar = text[i + 1];
+          
+          if (char === '"') {
+            if (inQuotes && nextChar === '"') {
+              current += '"';
+              i++; // Skip escaped quote
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (char === ',' && !inQuotes) {
+            row.push(current.trim());
+            current = '';
+          } else if ((char === '\r' || char === '\n') && !inQuotes) {
+            if (char === '\r' && nextChar === '\n') i++; // Skip \r\n
+            if (current || row.length > 0) {
+              row.push(current.trim());
+              if (row.some(cell => cell)) rows.push(row); // Skip empty rows
+              row = [];
+              current = '';
+            }
+          } else {
+            current += char;
+          }
         }
-        result.push(current);
-        return result;
+        // Handle last row
+        if (current || row.length > 0) {
+          row.push(current.trim());
+          if (row.some(cell => cell)) rows.push(row);
+        }
+        return rows;
       }
       
       function renderUploadPreview() {
@@ -1537,8 +1566,48 @@ app.get('/', (c) => {
         const a = assignments.find(x => x.event_id === eventId);
         if (!a) return;
         
+        const eventDate = a.event_date;
+        
+        // Find all crew assigned to OTHER events on the same date
+        const busyCrewOnDate = {};
+        const dayOffCrew = new Set();
+        
+        // Check assignments for same date
+        for (const other of assignments) {
+          if (other.event_id === eventId) continue; // Skip current event
+          if (other.event_date !== eventDate) continue; // Different date
+          
+          if (other.foh) {
+            if (!busyCrewOnDate[other.foh]) busyCrewOnDate[other.foh] = [];
+            busyCrewOnDate[other.foh].push(other.event_name.substring(0, 20));
+          }
+          for (const stageId of (other.stage || [])) {
+            if (!busyCrewOnDate[stageId]) busyCrewOnDate[stageId] = [];
+            busyCrewOnDate[stageId].push(other.event_name.substring(0, 20));
+          }
+        }
+        
+        // Check unavailability for this date
+        for (const crewId in unavailability) {
+          if (unavailability[crewId].has(eventDate)) {
+            dayOffCrew.add(parseInt(crewId));
+          }
+        }
+        
+        // Build "Also on this day" summary
+        const otherEventsToday = assignments.filter(x => x.event_date === eventDate && x.event_id !== eventId);
+        let sameDaySummary = '';
+        if (otherEventsToday.length > 0) {
+          sameDaySummary = '<div class="text-xs text-muted mt-2 p-2 bg-white/5 rounded-lg"><strong>Also on ' + formatDateDisplay(eventDate) + ':</strong> ';
+          sameDaySummary += otherEventsToday.map(e => {
+            const crewNames = [e.foh_name, ...(e.stage_names || [])].filter(Boolean).join(', ');
+            return e.event_name.substring(0, 25) + (crewNames ? ' (' + crewNames + ')' : '');
+          }).join('; ');
+          sameDaySummary += '</div>';
+        }
+        
         document.getElementById('modal-title').textContent = a.event_name.substring(0, 50);
-        document.getElementById('modal-subtitle').textContent = a.venue + ' | ' + a.vertical + ' | ' + formatDateDisplay(a.event_date);
+        document.getElementById('modal-subtitle').innerHTML = a.venue + ' | ' + a.vertical + ' | <strong>' + formatDateDisplay(a.event_date) + '</strong>' + sameDaySummary;
         
         // Show venue dropdown for multi-venue events
         const venueSection = document.getElementById('modal-venue-section');
@@ -1552,24 +1621,57 @@ app.get('/', (c) => {
         const needed = uploadedEvents.find(e => e.id === eventId)?.stage_crew_needed || 1;
         document.getElementById('modal-stage-count').textContent = '(total crew: ' + needed + ')';
         
+        // FOH dropdown with conflict indicators
         let fohHtml = '<option value="">-- Select FOH --</option>';
         for (const c of crew) {
           if (c.level === 'Hired') continue;
           const selected = c.id === a.foh ? 'selected' : '';
           const badge = c.level === 'Senior' ? '⭐' : c.level === 'Mid' ? '●' : '○';
-          fohHtml += '<option value="' + c.id + '" ' + selected + '>' + badge + ' ' + c.name + '</option>';
+          
+          const isDayOff = dayOffCrew.has(c.id);
+          const isBusy = busyCrewOnDate[c.id];
+          
+          let optionClass = '';
+          let suffix = '';
+          if (isDayOff) {
+            optionClass = 'color: #6b7280;'; // Grey
+            suffix = ' [DAY OFF]';
+          } else if (isBusy) {
+            optionClass = 'color: #f87171;'; // Red
+            suffix = ' [' + isBusy.join(', ') + ']';
+          }
+          
+          fohHtml += '<option value=\"' + c.id + '\" ' + selected + ' style=\"' + optionClass + '\" data-busy=\"' + (isBusy ? isBusy.join(',') : '') + '\" data-dayoff=\"' + isDayOff + '\">' + badge + ' ' + c.name + suffix + '</option>';
         }
         document.getElementById('modal-foh').innerHTML = fohHtml;
         
+        // Stage checkboxes with conflict indicators
         let stageHtml = '';
         for (const c of crew) {
           if (!c.can_stage) continue;
           const checked = a.stage?.includes(c.id) ? 'checked' : '';
+          
+          const isDayOff = dayOffCrew.has(c.id);
+          const isBusy = busyCrewOnDate[c.id];
+          
+          let labelClass = '';
+          let suffix = '';
+          let checkboxStyle = '';
+          
+          if (isDayOff) {
+            labelClass = 'opacity-50';
+            suffix = ' <span class=\"text-gray-500 text-xs\">[DAY OFF]</span>';
+            checkboxStyle = '';
+          } else if (isBusy) {
+            labelClass = '';
+            suffix = ' <span class=\"text-red-400 text-xs\">[' + isBusy.join(', ') + ']</span>';
+          }
+          
           const levelColor = c.level === 'Senior' ? 'text-blue-400' : c.level === 'Mid' ? 'text-teal-400' : c.level === 'Junior' ? 'text-amber-400' : 'text-gray-400';
-          const label = c.name;  // OC1, OC2, OC3 names already correct
-          stageHtml += '<label class="flex items-center gap-2 cursor-pointer p-2 hover:bg-white/5 rounded-lg">';
-          stageHtml += '<input type="checkbox" class="stage-checkbox" value="' + c.id + '" ' + checked + '>';
-          stageHtml += '<span class="' + levelColor + ' text-xs">' + c.level.charAt(0) + '</span><span>' + label + '</span></label>';
+          
+          stageHtml += '<label class=\"flex items-center gap-2 cursor-pointer p-2 hover:bg-white/5 rounded-lg ' + labelClass + '\">';
+          stageHtml += '<input type=\"checkbox\" class=\"stage-checkbox\" value=\"' + c.id + '\" ' + checked + ' data-busy=\"' + (isBusy ? isBusy.join(',') : '') + '\" data-dayoff=\"' + isDayOff + '\" ' + checkboxStyle + '>';
+          stageHtml += '<span class=\"' + levelColor + ' text-xs\">' + c.level.charAt(0) + '</span><span>' + c.name + '</span>' + suffix + '</label>';
         }
         document.getElementById('modal-stage').innerHTML = stageHtml;
         document.getElementById('edit-modal').dataset.eventId = eventId;
@@ -1579,8 +1681,47 @@ app.get('/', (c) => {
       
       async function saveModalChanges() {
         const eventId = parseInt(document.getElementById('edit-modal').dataset.eventId);
-        const fohId = parseInt(document.getElementById('modal-foh').value) || null;
-        const stageIds = [...document.querySelectorAll('.stage-checkbox:checked')].map(cb => parseInt(cb.value));
+        const fohSelect = document.getElementById('modal-foh');
+        const fohId = parseInt(fohSelect.value) || null;
+        const stageCheckboxes = [...document.querySelectorAll('.stage-checkbox:checked')];
+        const stageIds = stageCheckboxes.map(cb => parseInt(cb.value));
+        
+        // Check for conflicts and build warning message
+        const warnings = [];
+        
+        if (fohId) {
+          const fohOption = fohSelect.querySelector('option[value=\"' + fohId + '\"]');
+          const fohBusy = fohOption?.dataset.busy;
+          const fohDayOff = fohOption?.dataset.dayoff === 'true';
+          const fohName = crew.find(c => c.id === fohId)?.name;
+          
+          if (fohDayOff) {
+            warnings.push(fohName + ' has a DAY OFF on this date');
+          } else if (fohBusy) {
+            warnings.push(fohName + ' is already assigned to: ' + fohBusy);
+          }
+        }
+        
+        for (const cb of stageCheckboxes) {
+          const crewId = parseInt(cb.value);
+          const busy = cb.dataset.busy;
+          const dayOff = cb.dataset.dayoff === 'true';
+          const crewName = crew.find(c => c.id === crewId)?.name;
+          
+          if (dayOff) {
+            warnings.push(crewName + ' has a DAY OFF on this date');
+          } else if (busy) {
+            warnings.push(crewName + ' is already assigned to: ' + busy);
+          }
+        }
+        
+        // Show confirmation if there are conflicts
+        if (warnings.length > 0) {
+          const confirmMsg = 'Warning - Potential conflicts:\\n\\n' + warnings.join('\\n') + '\\n\\nDo you want to proceed with this assignment?';
+          if (!confirm(confirmMsg)) {
+            return; // User cancelled
+          }
+        }
         
         await fetch('/api/assignments/' + eventId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foh_id: fohId, stage_ids: stageIds }) });
         
@@ -1592,7 +1733,7 @@ app.get('/', (c) => {
           a.stage = stageIds;
           a.stage_names = stageIds.map(id => {
             const c = crew.find(x => x.id === id);
-            return c?.name;  // OC1, OC2, OC3 names already correct
+            return c?.name;
           }).filter(Boolean);
         }
         
