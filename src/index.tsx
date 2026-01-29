@@ -1361,6 +1361,8 @@ app.get('/', (c) => {
         let current = '';
         let inQuotes = false;
         let row = [];
+        const CR = String.fromCharCode(13); // \\r
+        const LF = String.fromCharCode(10); // \\n
         
         for (let i = 0; i < text.length; i++) {
           const char = text[i];
@@ -1376,8 +1378,8 @@ app.get('/', (c) => {
           } else if (char === ',' && !inQuotes) {
             row.push(current.trim());
             current = '';
-          } else if ((char === '\r' || char === '\n') && !inQuotes) {
-            if (char === '\r' && nextChar === '\n') i++; // Skip \r\n
+          } else if ((char === CR || char === LF) && !inQuotes) {
+            if (char === CR && nextChar === LF) i++; // Skip CRLF
             if (current || row.length > 0) {
               row.push(current.trim());
               if (row.some(cell => cell)) rows.push(row); // Skip empty rows
