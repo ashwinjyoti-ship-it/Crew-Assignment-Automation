@@ -1215,8 +1215,14 @@ app.get('/', (c) => {
         }
         html += '</tr></thead><tbody>';
         
-        for (const c of crew) {
-          if (c.level === 'Hired') continue;
+        // Sort crew: Naren first (second in command), then by level
+        const sortedCrew = [...crew].filter(c => c.level !== 'Hired').sort((a, b) => {
+          if (a.name === 'Naren') return -1;
+          if (b.name === 'Naren') return 1;
+          return 0; // Keep original level-based order for others
+        });
+        
+        for (const c of sortedCrew) {
           const levelColor = c.level === 'Senior' ? 'text-blue-400' : c.level === 'Mid' ? 'text-teal-400' : 'text-amber-400';
           html += '<tr class="border-b border-white/5 hover:bg-white/[0.02]"><td class="py-2 px-3 whitespace-nowrap sticky left-0 bg-gray-900/80 border-r border-white/10"><span class="' + levelColor + ' mr-2">' + (c.level === 'Senior' ? '●' : c.level === 'Mid' ? '●' : '○') + '</span>' + c.name + '</td>';
           for (let d = 1; d <= daysInMonth; d++) {
