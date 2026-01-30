@@ -175,15 +175,29 @@ function isManualOnlyVenue(venueRaw: string): { manual: boolean, reason: string 
 // Check if venue looks like crew initials (possible column shift in CSV)
 function isSuspiciousVenue(venue: string): boolean {
   const trimmed = venue.trim()
-  // Known valid short venue codes
-  const validShortCodes = ['JBT', 'TT', 'TET', 'GDT', 'LT', 'DPAG', 'SVR', 'OAP', 'TATA', 'LIB', 'EXPL']
-  if (validShortCodes.includes(trimmed.toUpperCase())) return false
+  const upper = trimmed.toUpperCase()
+  const lower = trimmed.toLowerCase()
   
-  // Flag if it's 2-4 uppercase letters only (likely crew initials)
+  // Known valid venue codes/names (case-insensitive)
+  const validVenues = ['JBT', 'TT', 'TET', 'GDT', 'LT', 'DPAG', 'SVR', 'OAP', 'TATA', 'LIB', 'EXPL', 
+                       'LITTLE', 'LIBRARY', 'ONLINE', 'SUNKEN', 'WEST']
+  if (validVenues.includes(upper)) return false
+  
+  // Check if it contains known venue keywords
+  const venueKeywords = ['theatre', 'theater', 'room', 'garden', 'hall', 'gallery', 'studio', 'foyer', 'lawn', 'online']
+  if (venueKeywords.some(kw => lower.includes(kw))) return false
+  
+  // Flag if it's 2-4 uppercase letters only (likely crew initials like SP, AGN)
   if (/^[A-Z]{2,4}$/.test(trimmed)) return true
   
-  // Flag if it looks like a name (starts with capital, has lowercase)
-  if (/^[A-Z][a-z]+$/.test(trimmed) && trimmed.length <= 10) return true
+  // Flag if it looks like a person's name (single capitalized word, short)
+  // But exclude common venue patterns
+  if (/^[A-Z][a-z]+$/.test(trimmed) && trimmed.length <= 8) {
+    // Exclude known venue words
+    const excludeWords = ['little', 'expl', 'tata', 'west', 'main', 'back', 'front', 'upper', 'lower']
+    if (excludeWords.includes(lower)) return false
+    return true
+  }
   
   return false
 }
@@ -274,13 +288,21 @@ app.post('/api/events/upload', async (c) => {
   
   const batchId = `batch_${Date.now()}`
   
+  // Normalize event fields (accept both 'program' and 'name')
+  for (const event of events) {
+    if (!event.name && event.program) {
+      event.name = event.program
+    }
+  }
+  
   // Group multi-day events by name
   const eventGroups: Record<string, any[]> = {}
   for (const event of events) {
-    if (!eventGroups[event.name]) {
-      eventGroups[event.name] = []
+    const eventName = event.name || 'Unnamed Event'
+    if (!eventGroups[eventName]) {
+      eventGroups[eventName] = []
     }
-    eventGroups[event.name].push(event)
+    eventGroups[eventName].push({ ...event, name: eventName })
   }
   
   const insertedEvents = []
@@ -1899,7 +1921,7 @@ app.get('/', (c) => {
         document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', () => openEditModal(parseInt(btn.dataset.eventId))));
       }
       
-      function openEditModal(eventId) {
+      async function openEditModal(eventId) {
         const a = assignments.find(x => x.event_id === eventId);
         if (!a) return;
         
@@ -1924,7 +1946,22 @@ app.get('/', (c) => {
           }
         }
         
-        // Check unavailability for this date
+        // Fetch unavailability for the event's month to ensure day-off data is available
+        // This is needed because the Step 1 calendar may show a different month
+        const eventMonth = eventDate.substring(0, 7); // yyyy-mm
+        try {
+          const unavailRes = await fetch('/api/unavailability?month=' + eventMonth);
+          const unavailData = await unavailRes.json();
+          // Merge into unavailability (don't overwrite, just ensure this month's data exists)
+          for (const u of unavailData) {
+            if (!unavailability[u.crew_id]) unavailability[u.crew_id] = new Set();
+            unavailability[u.crew_id].add(u.unavailable_date);
+          }
+        } catch (e) {
+          console.error('Failed to fetch unavailability for event month:', e);
+        }
+        
+        // Check unavailability for this date (now with fresh data for event's month)
         for (const crewId in unavailability) {
           if (unavailability[crewId].has(eventDate)) {
             dayOffCrew.add(parseInt(crewId));
