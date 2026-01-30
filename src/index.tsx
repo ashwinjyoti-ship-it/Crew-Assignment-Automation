@@ -1527,14 +1527,14 @@ app.get('/', (c) => {
           groups[key].events.push(e);
         });
         
-        let html = '<table class="w-full text-sm"><thead><tr class="text-muted"><th class="text-left py-2">Event</th><th class="text-left py-2">Venue</th><th class="text-left py-2">Crew #</th><th class="py-2"></th></tr></thead><tbody>';
+        let html = '<table class="w-full text-sm"><thead><tr class="text-muted"><th class="text-left py-2" style="width:60%">Event</th><th class="text-left py-2">Venue</th><th class="text-left py-2">Crew #</th><th class="py-2"></th></tr></thead><tbody>';
         for (const [key, group] of Object.entries(groups)) {
           const e = group.firstEvent;
           const daysLabel = group.events.length > 1 ? ' <span class="text-blue-400">(' + group.events.length + 'd)</span>' : '';
           const manualBadge = e.needs_manual_review ? '<span class="manual-badge">' + (e.manual_flag_reason || 'Manual') + '</span>' : '';
           
           html += '<tr class="border-t border-white/5">';
-          html += '<td class="py-3">' + e.name.substring(0, 35) + (e.name.length > 35 ? '...' : '') + daysLabel + '</td>';
+          html += '<td class="py-3" style="line-height:1.4; word-wrap:break-word"><span class="block text-sm">' + e.name + '</span>' + daysLabel + '</td>';
           html += '<td class="py-3">' + e.venue + '</td>';
           html += '<td class="py-3">';
           html += '<select class="stage-select w-16" data-group="' + key + '" data-event-ids="' + group.events.map(ev => ev.id).join(',') + '">';
