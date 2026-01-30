@@ -58,6 +58,9 @@ const VENUE_MAP: Record<string, string> = {
   'Godrej Dance Theatre': 'Godrej Dance',
   'LT': 'Little Theatre',
   'Little Theatre': 'Little Theatre',
+  'Little': 'Little Theatre',
+  'Lib': 'Others',
+  'Library': 'Others',
   'DPAG': 'Others',
   'Dilip Piramal Art Gallery': 'Others',
   'Stuart Liff': 'Others',
@@ -173,7 +176,7 @@ function isManualOnlyVenue(venueRaw: string): { manual: boolean, reason: string 
 function isSuspiciousVenue(venue: string): boolean {
   const trimmed = venue.trim()
   // Known valid short venue codes
-  const validShortCodes = ['JBT', 'TT', 'TET', 'GDT', 'LT', 'DPAG', 'SVR', 'OAP', 'TATA']
+  const validShortCodes = ['JBT', 'TT', 'TET', 'GDT', 'LT', 'DPAG', 'SVR', 'OAP', 'TATA', 'LIB', 'EXPL']
   if (validShortCodes.includes(trimmed.toUpperCase())) return false
   
   // Flag if it's 2-4 uppercase letters only (likely crew initials)
@@ -306,7 +309,9 @@ app.post('/api/events/upload', async (c) => {
       let manualReason = manualCheck.reason || (isMultiVenue ? 'Multi-venue event' : '')
       
       // Check for suspicious venue (possible CSV column shift)
+      let isSuspicious = false
       if (isSuspiciousVenue(event.venue || '')) {
+        isSuspicious = true
         manualOnly = true
         manualReason = manualReason ? manualReason + '; Suspicious venue: ' + event.venue : 'Suspicious venue: ' + event.venue + ' (check CSV columns)'
       }
@@ -314,8 +319,8 @@ app.post('/api/events/upload', async (c) => {
       // No special-casing for any crew member name in sound requirements
       // Assignment follows standard rules based on venue/vertical capabilities
       
-      // Default crew count
-      const defaultCrew = manualOnly ? 0 : (VENUE_DEFAULTS[venue] || 1)
+      // Default crew count - suspicious venues get 1 crew (not 0)
+      const defaultCrew = isSuspicious ? 1 : (manualOnly ? 0 : (VENUE_DEFAULTS[venue] || 1))
       
       const result = await DB.prepare(
         `INSERT INTO events (batch_id, name, event_date, venue, venue_normalized, team, vertical, sound_requirements, call_time, stage_crew_needed, event_group, needs_manual_review, manual_flag_reason) 
@@ -1326,6 +1331,18 @@ app.get('/', (c) => {
             <div>
               <label class="block text-sm font-medium mb-2">FOH Engineer</label>
               <select id="modal-foh" class="w-full py-3"></select>
+              <!-- Smart Swap Panel (hidden by default) -->
+              <div id="swap-panel" class="hidden mt-3 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                <div class="flex items-center gap-2 text-blue-400 text-sm mb-2">
+                  <i class="fas fa-exchange-alt"></i>
+                  <span class="font-medium">Smart Swap Available</span>
+                </div>
+                <p id="swap-description" class="text-sm text-muted mb-3"></p>
+                <div id="swap-details" class="text-sm space-y-1 mb-3"></div>
+                <button id="swap-btn" class="btn-primary px-4 py-2 rounded-lg text-sm w-full">
+                  <i class="fas fa-exchange-alt mr-2"></i>Confirm Swap
+                </button>
+              </div>
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">Stage Crew <span id="modal-stage-count" class="text-muted"></span></label>
@@ -2001,6 +2018,124 @@ app.get('/', (c) => {
         document.getElementById('edit-modal').dataset.eventId = eventId;
         document.getElementById('edit-modal').classList.remove('hidden');
         document.getElementById('edit-modal').classList.add('flex');
+        
+        // Setup Smart Swap detection on FOH change
+        document.getElementById('modal-foh').addEventListener('change', handleFohChange);
+        document.getElementById('swap-panel').classList.add('hidden');
+        
+        // Store context for swap detection
+        window.swapContext = {
+          currentEventId: eventId,
+          currentAssignment: a,
+          busyCrewOnDate: busyCrewOnDate,
+          eventDate: eventDate,
+          originalFoh: a.foh
+        };
+      }
+      
+      function handleFohChange(e) {
+        const newFohId = parseInt(e.target.value) || null;
+        const ctx = window.swapContext;
+        if (!ctx || !newFohId) {
+          document.getElementById('swap-panel').classList.add('hidden');
+          return;
+        }
+        
+        // Check if new FOH is busy (assigned to another event on same day)
+        const busyEvents = ctx.busyCrewOnDate[newFohId];
+        if (!busyEvents || busyEvents.length === 0) {
+          document.getElementById('swap-panel').classList.add('hidden');
+          return;
+        }
+        
+        // Find the event where this crew is currently assigned
+        const otherEvent = assignments.find(a => 
+          a.event_date === ctx.eventDate && 
+          a.event_id !== ctx.currentEventId &&
+          a.foh === newFohId
+        );
+        
+        if (!otherEvent) {
+          // They're on stage duty, not a simple FOH swap
+          document.getElementById('swap-panel').classList.add('hidden');
+          return;
+        }
+        
+        // We can offer a swap!
+        const newFohName = crew.find(c => c.id === newFohId)?.name;
+        const currentFohName = crew.find(c => c.id === ctx.originalFoh)?.name || 'None';
+        const currentEventName = ctx.currentAssignment.event_name;
+        const otherEventName = otherEvent.event_name;
+        
+        // Store swap details for execution
+        window.pendingSwap = {
+          event1Id: ctx.currentEventId,
+          event1Name: currentEventName,
+          event1OldFoh: ctx.originalFoh,
+          event1NewFoh: newFohId,
+          event2Id: otherEvent.event_id,
+          event2Name: otherEventName,
+          event2OldFoh: newFohId,
+          event2NewFoh: ctx.originalFoh,
+          newFohName: newFohName,
+          currentFohName: currentFohName
+        };
+        
+        // Show swap panel
+        const swapPanel = document.getElementById('swap-panel');
+        const swapDesc = document.getElementById('swap-description');
+        const swapDetails = document.getElementById('swap-details');
+        
+        swapDesc.textContent = newFohName + ' is currently assigned to "' + otherEventName.substring(0, 30) + '". Swap them?';
+        
+        swapDetails.innerHTML = 
+          '<div class="flex items-center gap-2"><span class="text-muted">•</span> <span>' + currentEventName.substring(0, 35) + ':</span> <span class="text-red-400">' + currentFohName + '</span> <i class="fas fa-arrow-right text-blue-400 mx-1"></i> <span class="text-green-400">' + newFohName + '</span></div>' +
+          '<div class="flex items-center gap-2"><span class="text-muted">•</span> <span>' + otherEventName.substring(0, 35) + ':</span> <span class="text-red-400">' + newFohName + '</span> <i class="fas fa-arrow-right text-blue-400 mx-1"></i> <span class="text-green-400">' + currentFohName + '</span></div>';
+        
+        swapPanel.classList.remove('hidden');
+      }
+      
+      async function executeSwap() {
+        const swap = window.pendingSwap;
+        if (!swap) return;
+        
+        // Get current stage assignments for both events (preserve them)
+        const event1 = assignments.find(a => a.event_id === swap.event1Id);
+        const event2 = assignments.find(a => a.event_id === swap.event2Id);
+        
+        const stage1 = event1?.stage || [];
+        const stage2 = event2?.stage || [];
+        
+        // Update both assignments via API
+        await fetch('/api/assignments/' + swap.event1Id, { 
+          method: 'PUT', 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify({ foh_id: swap.event1NewFoh, stage_ids: stage1 }) 
+        });
+        
+        await fetch('/api/assignments/' + swap.event2Id, { 
+          method: 'PUT', 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify({ foh_id: swap.event2NewFoh, stage_ids: stage2 }) 
+        });
+        
+        // Update local state
+        if (event1) {
+          event1.foh = swap.event1NewFoh;
+          event1.foh_name = swap.newFohName;
+          event1.foh_conflict = !swap.event1NewFoh;
+        }
+        if (event2) {
+          event2.foh = swap.event2NewFoh;
+          event2.foh_name = swap.currentFohName;
+          event2.foh_conflict = !swap.event2NewFoh;
+        }
+        
+        // Clear pending swap and close modal
+        window.pendingSwap = null;
+        window.swapContext = null;
+        closeModal();
+        renderAssignments();
       }
       
       async function saveModalChanges() {
@@ -2115,6 +2250,7 @@ app.get('/', (c) => {
         document.getElementById('modal-close').addEventListener('click', closeModal);
         document.getElementById('modal-cancel').addEventListener('click', closeModal);
         document.getElementById('modal-save').addEventListener('click', saveModalChanges);
+        document.getElementById('swap-btn').addEventListener('click', executeSwap);
         document.getElementById('edit-modal').addEventListener('click', (e) => { if (e.target.id === 'edit-modal') closeModal(); });
         
         document.getElementById('export-csv').addEventListener('click', exportCSV);
