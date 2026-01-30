@@ -962,12 +962,8 @@ app.get('/api/export/csv', async (c) => {
       return '"' + val + '"'
     }
     
-    // Convert yyyy-mm-dd to dd-mm-yyyy for output
+    // Keep yyyy-mm-dd format for ncpa-sound.pages.dev compatibility
     let dateOut = e.event_date
-    if (dateOut && /^\d{4}-\d{2}-\d{2}$/.test(dateOut)) {
-      const [yyyy, mm, dd] = dateOut.split('-')
-      dateOut = dd + '-' + mm + '-' + yyyy
-    }
     csv += `${dateOut},${escapeField(e.name)},${escapeField(e.venue)},${escapeField(e.team)},${escapeField(e.sound_requirements)},${escapeField(e.call_time)},${escapeField(crewList)}\n`
   }
   
