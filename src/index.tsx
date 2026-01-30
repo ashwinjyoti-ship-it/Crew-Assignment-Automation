@@ -270,6 +270,14 @@ app.post('/api/events/upload', async (c) => {
     const eventGroup = groupEvents.length > 1 ? `group_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` : null
     
     for (const event of groupEvents) {
+      // Ensure date is in yyyy-mm-dd format for consistent comparison with unavailability
+      let eventDate = event.date || ''
+      if (eventDate.match(/^\d{2}-\d{2}-\d{4}$/)) {
+        // Convert dd-mm-yyyy to yyyy-mm-dd
+        const [dd, mm, yyyy] = eventDate.split('-')
+        eventDate = `${yyyy}-${mm}-${dd}`
+      }
+      
       // Map venue
       const { mapped: venue, isMultiVenue } = mapVenue(event.venue || '')
       
@@ -293,7 +301,7 @@ app.post('/api/events/upload', async (c) => {
       ).bind(
         batchId, 
         event.name, 
-        event.date, 
+        eventDate,  // Normalized to yyyy-mm-dd
         event.venue || '',  // Original venue
         venue,  // Normalized venue for rules
         event.team || '',
@@ -310,7 +318,7 @@ app.post('/api/events/upload', async (c) => {
         id: result.meta.last_row_id,
         batch_id: batchId,
         name: event.name,
-        event_date: event.date,
+        event_date: eventDate,  // Normalized yyyy-mm-dd
         venue: event.venue || '',  // Original
         venue_normalized: venue,  // For rules
         team: event.team || '',
