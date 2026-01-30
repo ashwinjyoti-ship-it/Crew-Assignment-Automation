@@ -682,13 +682,39 @@ app.post('/api/assignments/run', async (c) => {
       
       stageCandidates.sort((a, b) => b.score - a.score)
       
+      // Separate internal crew from outside crew (OC)
+      const internalCandidates = stageCandidates.filter(c => c.crew.level !== 'Hired')
+      const outsideCandidates = stageCandidates.filter(c => c.crew.level === 'Hired')
+      
       const selectedStage: number[] = []
       const stageNames: string[] = []
       
-      for (let i = 0; i < Math.min(stageNeeded, stageCandidates.length); i++) {
-        const stageCrew = stageCandidates[i].crew
-        selectedStage.push(stageCrew.id)
-        stageNames.push(stageCrew.name)
+      // Rule: Always try to have at least one internal crew on stage with OC
+      // Select internal crew first, then fill remaining with OC if needed
+      let internalSelected = 0
+      let outsideSelected = 0
+      
+      // First pass: select from internal crew
+      for (const candidate of internalCandidates) {
+        if (selectedStage.length >= stageNeeded) break
+        selectedStage.push(candidate.crew.id)
+        stageNames.push(candidate.crew.name)
+        internalSelected++
+      }
+      
+      // Second pass: if still need more, use outside crew
+      // But ensure we have at least 1 internal if using OC (unless no internal available)
+      for (const candidate of outsideCandidates) {
+        if (selectedStage.length >= stageNeeded) break
+        selectedStage.push(candidate.crew.id)
+        stageNames.push(candidate.crew.name)
+        outsideSelected++
+      }
+      
+      // Update workload tracking for selected crew
+      for (let i = 0; i < selectedStage.length; i++) {
+        const stageCrew = stageCandidates.find(c => c.crew.id === selectedStage[i])?.crew
+        if (!stageCrew) continue
         
         for (const date of eventDates) {
           dailyAssignments[date].add(stageCrew.id)
