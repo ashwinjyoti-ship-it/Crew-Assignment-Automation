@@ -464,6 +464,11 @@ app.post('/api/assignments/run', async (c) => {
   // Track current month workload (for updating at end)
   const currentMonthWorkload: Record<number, number> = {}
   
+  // Naren's monthly assignment limit (second-in-command with admin duties)
+  const NAREN_MONTHLY_LIMIT = 7
+  const narenCrew = crew.find(c => c.name === 'Naren')
+  const narenId = narenCrew?.id || -1
+  
   // Get unavailability
   const unavailResult = await DB.prepare('SELECT crew_id, unavailable_date FROM crew_unavailability').all()
   const unavailMap: Record<string, Set<number>> = {}
@@ -564,6 +569,11 @@ app.post('/api/assignments/run', async (c) => {
       for (const date of eventDates) {
         if (unavailMap[date]?.has(crewId)) return false
         if (dailyAssignments[date]?.has(crewId)) return false
+      }
+      // Check Naren's monthly limit (admin duties cap)
+      if (crewId === narenId) {
+        const narenCurrentMonth = currentMonthWorkload[narenId] || 0
+        if (narenCurrentMonth >= NAREN_MONTHLY_LIMIT) return false
       }
       return true
     }
