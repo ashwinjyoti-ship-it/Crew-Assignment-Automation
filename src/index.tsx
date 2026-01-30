@@ -1964,11 +1964,11 @@ app.get('/', (c) => {
         // Check unavailability for this date (now with fresh data for event's month)
         // Normalize eventDate to yyyy-mm-dd for comparison (unavailability dates are stored as yyyy-mm-dd)
         let normalizedEventDate = eventDate;
-        if (eventDate.match(/^\d{2}-\d{2}-\d{4}$/)) {
+        if (eventDate.match(/^\\d{2}-\\d{2}-\\d{4}$/)) {
           // Convert dd-mm-yyyy to yyyy-mm-dd
           const [dd, mm, yyyy] = eventDate.split('-');
           normalizedEventDate = yyyy + '-' + mm + '-' + dd;
-        } else if (eventDate.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+        } else if (eventDate.match(/^\\d{2}\\/\\d{2}\\/\\d{4}$/)) {
           // Convert dd/mm/yyyy to yyyy-mm-dd
           const [dd, mm, yyyy] = eventDate.split('/');
           normalizedEventDate = yyyy + '-' + mm + '-' + dd;
