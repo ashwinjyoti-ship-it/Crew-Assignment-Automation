@@ -427,7 +427,10 @@ function canDoFOH(crew: CrewMember, venue: string, vertical: string): { can: boo
 
 app.post('/api/assignments/run', async (c) => {
   const { DB } = c.env
-  const { batch_id } = await c.req.json()
+  const { batch_id, foh_preferences } = await c.req.json()
+  
+  // FOH Preferences: array of { eventContains, venue, crewId, crewName }
+  const preferences = foh_preferences || []
   
   // Get all events
   const eventsResult = await DB.prepare(
@@ -611,67 +614,131 @@ app.post('/api/assignments/run', async (c) => {
     // ========== FOH ASSIGNMENT (Two-tier workload) ==========
     let selectedFOH: CrewMember | null = null
     let isSpecialistAssignment = false
+    let preferenceApplied = false
+    let preferenceConflict = false
     
-    // Get specialists for this vertical
-    const specialistIds = verticalSpecialistRotation[event.vertical] || []
-    const availableSpecialists = specialistIds.filter(id => {
-      const c = crew.find(cr => cr.id === id)!
-      if (!isAvailable(id)) return false
-      const venueCapability = c.venue_capabilities[event.venue_normalized]
-      return venueCapability && venueCapability !== 'N'
+    // Check for FOH preference match FIRST
+    const matchingPref = preferences.find((p: any) => {
+      // Case-insensitive contains match for event name
+      const eventNameLower = event.name.toLowerCase()
+      const prefEventLower = p.eventContains.toLowerCase()
+      const eventMatches = eventNameLower.includes(prefEventLower)
+      
+      // Venue match (normalize both)
+      const venueMatches = p.venue === event.venue_normalized || 
+                          p.venue === event.venue ||
+                          event.venue_normalized.toLowerCase().includes(p.venue.toLowerCase())
+      
+      return eventMatches && venueMatches
     })
     
-    // Try specialist rotation first (same-month cycling)
-    if (availableSpecialists.length > 0) {
-      // Get current rotation index for this vertical
-      const rotationIdx = verticalRotationIndex[event.vertical] || 0
-      
-      // Find next available specialist in rotation
-      for (let i = 0; i < availableSpecialists.length; i++) {
-        const idx = (rotationIdx + i) % availableSpecialists.length
-        const candidateId = availableSpecialists[idx]
-        const candidate = crew.find(c => c.id === candidateId)!
-        
-        selectedFOH = candidate
-        isSpecialistAssignment = true
-        
-        // Advance rotation index for next specialist event of same vertical
-        verticalRotationIndex[event.vertical] = (idx + 1) % availableSpecialists.length
-        break
+    if (matchingPref) {
+      const preferredCrew = crew.find(c => c.id === matchingPref.crewId)
+      if (preferredCrew) {
+        if (isAvailable(preferredCrew.id)) {
+          // Preference can be applied
+          selectedFOH = preferredCrew
+          preferenceApplied = true
+        } else {
+          // Preferred crew is NOT available - block and flag for manual
+          preferenceConflict = true
+          eventAssignment.foh_conflict = true
+          conflicts.push({
+            event_id: event.id,
+            event_name: event.name,
+            type: 'FOH Preference',
+            reason: 'Preferred FOH "' + preferredCrew.name + '" is unavailable (day-off or already assigned). Manual assignment required.'
+          })
+        }
       }
     }
     
-    // If no specialist available, fall back to capable crew (use 3-month workload)
-    if (!selectedFOH) {
-      const capableCandidates: { crew: CrewMember, score: number }[] = []
+    // Skip normal FOH logic if preference was applied or there's a preference conflict
+    if (!selectedFOH && !preferenceConflict) {
+      // Get specialists for this vertical
+      const specialistIds = verticalSpecialistRotation[event.vertical] || []
+      const availableSpecialists = specialistIds.filter(id => {
+        const c = crew.find(cr => cr.id === id)!
+        if (!isAvailable(id)) return false
+        const venueCapability = c.venue_capabilities[event.venue_normalized]
+        return venueCapability && venueCapability !== 'N'
+      })
       
-      for (const c of crew) {
-        if (c.level === 'Hired') continue
-        if (!isAvailable(c.id)) continue
+      // Try specialist rotation first (same-month cycling)
+      if (availableSpecialists.length > 0) {
+        // Get current rotation index for this vertical
+        const rotationIdx = verticalRotationIndex[event.vertical] || 0
         
-        const capability = canDoFOH(c, event.venue_normalized, event.vertical)
-        if (!capability.can) continue
-        
-        // Score based on seniority and 3-month workload
-        const workload = workload3Month[c.id] || 0
-        let score = (3 - LEVEL_ORDER[c.level]) * 100  // Senior=300, Mid=200, Junior=100
-        score -= workload * 5  // Penalize based on 3-month history
-        
-        capableCandidates.push({ crew: c, score })
+        // Find next available specialist in rotation
+        for (let i = 0; i < availableSpecialists.length; i++) {
+          const idx = (rotationIdx + i) % availableSpecialists.length
+          const candidateId = availableSpecialists[idx]
+          const candidate = crew.find(c => c.id === candidateId)!
+          
+          selectedFOH = candidate
+          isSpecialistAssignment = true
+          
+          // Advance rotation index for next specialist event of same vertical
+          verticalRotationIndex[event.vertical] = (idx + 1) % availableSpecialists.length
+          break
+        }
       }
       
-      capableCandidates.sort((a, b) => b.score - a.score)
-      
-      if (capableCandidates.length > 0) {
-        selectedFOH = capableCandidates[0].crew
+      // If no specialist available, fall back to capable crew (use 3-month workload)
+      if (!selectedFOH) {
+        const capableCandidates: { crew: CrewMember, score: number }[] = []
+        
+        for (const c of crew) {
+          if (c.level === 'Hired') continue
+          if (!isAvailable(c.id)) continue
+          
+          const capability = canDoFOH(c, event.venue_normalized, event.vertical)
+          if (!capability.can) continue
+          
+          // Score based on seniority and 3-month workload
+          const workload = workload3Month[c.id] || 0
+          let score = (3 - LEVEL_ORDER[c.level]) * 100  // Senior=300, Mid=200, Junior=100
+          score -= workload * 5  // Penalize based on 3-month history
+          
+          capableCandidates.push({ crew: c, score })
+        }
+        
+        capableCandidates.sort((a, b) => b.score - a.score)
+        
+        if (capableCandidates.length > 0) {
+          selectedFOH = capableCandidates[0].crew
+        }
       }
-    }
-    
-    if (selectedFOH) {
+      
+      if (selectedFOH) {
+        eventAssignment.foh = selectedFOH.id
+        eventAssignment.foh_name = selectedFOH.name
+        eventAssignment.foh_level = selectedFOH.level
+        eventAssignment.foh_specialist = isSpecialistAssignment
+        
+        for (const date of eventDates) {
+          dailyAssignments[date].add(selectedFOH.id)
+        }
+        currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + eventDates.length
+        workload3Month[selectedFOH.id] = (workload3Month[selectedFOH.id] || 0) + eventDates.length
+        
+        await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
+      } else {
+        eventAssignment.foh_conflict = true
+        conflicts.push({
+          event_id: event.id,
+          event_name: event.name,
+          type: 'FOH',
+          reason: 'No qualified FOH available'
+        })
+      }
+    } else if (selectedFOH) {
+      // Preference was applied - record the FOH assignment
       eventAssignment.foh = selectedFOH.id
       eventAssignment.foh_name = selectedFOH.name
       eventAssignment.foh_level = selectedFOH.level
-      eventAssignment.foh_specialist = isSpecialistAssignment
+      eventAssignment.foh_specialist = false
+      eventAssignment.foh_preference = true  // Mark as preference-based assignment
       
       for (const date of eventDates) {
         dailyAssignments[date].add(selectedFOH.id)
@@ -680,15 +747,8 @@ app.post('/api/assignments/run', async (c) => {
       workload3Month[selectedFOH.id] = (workload3Month[selectedFOH.id] || 0) + eventDates.length
       
       await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
-    } else {
-      eventAssignment.foh_conflict = true
-      conflicts.push({
-        event_id: event.id,
-        event_name: event.name,
-        type: 'FOH',
-        reason: 'No qualified FOH available'
-      })
     }
+    // If preferenceConflict is true, FOH is left unassigned for manual review
     
     // ========== STAGE ASSIGNMENT (3-month workload balancing) ==========
     // Key principle: Workload is PRIMARY driver - everyone shares Stage work fairly
@@ -1134,6 +1194,64 @@ app.get('/', (c) => {
           <h2 class="text-xl font-semibold flex items-center gap-3 mb-6"><i class="fas fa-users text-blue-400"></i>Crew Requirements</h2>
           <p class="text-muted text-sm mb-4">Total crew count (FOH + Stage). <span class="manual-badge">Manual</span> events require your direct assignment.</p>
           <div id="stage-requirements" class="glass-card-light p-4 max-h-96 overflow-y-auto"></div>
+          
+          <!-- FOH Preferences Section -->
+          <div class="mt-6">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-medium flex items-center gap-2"><i class="fas fa-star text-amber-400"></i>FOH Preferences</h3>
+              <button id="add-preference-btn" class="btn-secondary px-4 py-2 rounded-xl text-sm"><i class="fas fa-plus mr-2"></i>Add Preference</button>
+            </div>
+            <p class="text-muted text-sm mb-4">Lock specific FOH assignments before running the engine. Matching is case-insensitive.</p>
+            
+            <!-- Preferences List -->
+            <div id="preferences-list" class="glass-card-light p-4 mb-4 hidden">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-muted border-b border-white/10">
+                    <th class="text-left py-2 w-8">#</th>
+                    <th class="text-left py-2">Event Contains</th>
+                    <th class="text-left py-2">Venue</th>
+                    <th class="text-left py-2">FOH Crew</th>
+                    <th class="text-left py-2 w-12"></th>
+                  </tr>
+                </thead>
+                <tbody id="preferences-tbody"></tbody>
+              </table>
+            </div>
+            
+            <!-- Add Preference Form (hidden by default) -->
+            <div id="preference-form" class="glass-card-light p-4 hidden">
+              <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                <div>
+                  <label class="block text-sm text-muted mb-2">Event Name Contains</label>
+                  <input type="text" id="pref-event" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400" placeholder="e.g., SOI, Jazz, Home grown">
+                </div>
+                <div>
+                  <label class="block text-sm text-muted mb-2">Venue</label>
+                  <select id="pref-venue" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+                    <option value="">Select Venue</option>
+                    <option value="JBT">JBT</option>
+                    <option value="Tata">Tata</option>
+                    <option value="Experimental">Experimental</option>
+                    <option value="Godrej Dance">Godrej Dance</option>
+                    <option value="Little Theatre">Little Theatre</option>
+                    <option value="Others">Others</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm text-muted mb-2">FOH Crew</label>
+                  <select id="pref-foh" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+                    <option value="">Select FOH</option>
+                  </select>
+                </div>
+                <div class="flex gap-2">
+                  <button id="save-preference" class="btn-primary px-4 py-2 rounded-lg text-sm flex-1"><i class="fas fa-check mr-1"></i>Add</button>
+                  <button id="cancel-preference" class="btn-secondary px-4 py-2 rounded-lg text-sm"><i class="fas fa-times"></i></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          
           <div class="flex justify-between mt-6">
             <button id="step3-back" class="btn-secondary px-6 py-3 rounded-xl font-medium"><i class="fas fa-arrow-left mr-2"></i> Back</button>
             <button id="step3-run" class="btn-primary px-6 py-3 rounded-xl font-medium"><i class="fas fa-magic mr-2"></i>Run Assignment Engine</button>
@@ -1234,6 +1352,7 @@ app.get('/', (c) => {
       let batchId = null;
       let assignments = [];
       let conflicts = [];
+      let fohPreferences = []; // Batch-only FOH preferences: { eventContains, venue, crewId, crewName }
       
       // Helper: Convert yyyy-mm-dd to dd-mm-yyyy for display
       function formatDateDisplay(dateStr) {
@@ -1561,6 +1680,107 @@ app.get('/', (c) => {
             }
           });
         });
+        
+        // Initialize FOH preferences UI
+        renderPreferencesUI();
+      }
+      
+      // FOH Preferences Functions
+      function showPreferenceForm() {
+        const form = document.getElementById('preference-form');
+        form.classList.remove('hidden');
+        
+        // Populate FOH dropdown with non-OC crew
+        const fohSelect = document.getElementById('pref-foh');
+        fohSelect.innerHTML = '<option value="">Select FOH</option>';
+        crew.filter(c => c.level !== 'Hired' && !c.is_outside_crew).forEach(c => {
+          fohSelect.innerHTML += '<option value="' + c.id + '">' + c.name + ' (' + c.level + ')</option>';
+        });
+        
+        // Clear inputs
+        document.getElementById('pref-event').value = '';
+        document.getElementById('pref-venue').value = '';
+        document.getElementById('pref-foh').value = '';
+      }
+      
+      function hidePreferenceForm() {
+        document.getElementById('preference-form').classList.add('hidden');
+      }
+      
+      function savePreference() {
+        const eventContains = document.getElementById('pref-event').value.trim();
+        const venue = document.getElementById('pref-venue').value;
+        const crewId = document.getElementById('pref-foh').value;
+        
+        if (!eventContains || !venue || !crewId) {
+          alert('Please fill in all fields: Event Name, Venue, and FOH Crew');
+          return;
+        }
+        
+        const crewMember = crew.find(c => c.id == crewId);
+        if (!crewMember) return;
+        
+        // Check for duplicate preference
+        const exists = fohPreferences.some(p => 
+          p.eventContains.toLowerCase() === eventContains.toLowerCase() && 
+          p.venue === venue
+        );
+        if (exists) {
+          alert('A preference for this Event + Venue combination already exists');
+          return;
+        }
+        
+        fohPreferences.push({
+          eventContains: eventContains,
+          venue: venue,
+          crewId: parseInt(crewId),
+          crewName: crewMember.name
+        });
+        
+        hidePreferenceForm();
+        renderPreferencesUI();
+      }
+      
+      function deletePreference(index) {
+        fohPreferences.splice(index, 1);
+        renderPreferencesUI();
+      }
+      
+      function renderPreferencesUI() {
+        const listContainer = document.getElementById('preferences-list');
+        const tbody = document.getElementById('preferences-tbody');
+        
+        if (fohPreferences.length === 0) {
+          listContainer.classList.add('hidden');
+          return;
+        }
+        
+        listContainer.classList.remove('hidden');
+        let html = '';
+        fohPreferences.forEach((p, idx) => {
+          html += '<tr class="border-t border-white/5">';
+          html += '<td class="py-2 text-muted">' + (idx + 1) + '</td>';
+          html += '<td class="py-2"><span class="text-blue-400">' + escapeHtml(p.eventContains) + '</span></td>';
+          html += '<td class="py-2">' + p.venue + '</td>';
+          html += '<td class="py-2 font-medium">' + p.crewName + '</td>';
+          html += '<td class="py-2"><button class="text-red-400 hover:text-red-300 delete-pref-btn" data-index="' + idx + '"><i class="fas fa-trash-alt"></i></button></td>';
+          html += '</tr>';
+        });
+        tbody.innerHTML = html;
+        
+        // Attach delete handlers
+        document.querySelectorAll('.delete-pref-btn').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const index = parseInt(e.currentTarget.dataset.index);
+            deletePreference(index);
+          });
+        });
+      }
+      
+      function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
       }
       
       async function runAssignmentEngine() {
@@ -1586,7 +1806,7 @@ app.get('/', (c) => {
           }
         }, 400);
         
-        const res = await fetch('/api/assignments/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ batch_id: batchId }) });
+        const res = await fetch('/api/assignments/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ batch_id: batchId, foh_preferences: fohPreferences }) });
         clearInterval(progressInterval);
         
         const data = await res.json();
@@ -1882,7 +2102,7 @@ app.get('/', (c) => {
         document.getElementById('step4-back').addEventListener('click', () => goToStep(3));
         document.getElementById('step4-next').addEventListener('click', () => goToStep(5));
         document.getElementById('step5-back').addEventListener('click', () => goToStep(4));
-        document.getElementById('start-new').addEventListener('click', () => { uploadedEvents = []; batchId = null; assignments = []; conflicts = []; document.getElementById('upload-preview').classList.add('hidden'); document.getElementById('step2-next').classList.add('hidden'); document.getElementById('csv-input').value = ''; goToStep(1); });
+        document.getElementById('start-new').addEventListener('click', () => { uploadedEvents = []; batchId = null; assignments = []; conflicts = []; fohPreferences = []; document.getElementById('upload-preview').classList.add('hidden'); document.getElementById('step2-next').classList.add('hidden'); document.getElementById('csv-input').value = ''; goToStep(1); });
         
         const uploadZone = document.getElementById('upload-zone');
         const csvInput = document.getElementById('csv-input');
@@ -1900,6 +2120,11 @@ app.get('/', (c) => {
         document.getElementById('export-csv').addEventListener('click', exportCSV);
         document.getElementById('export-calendar').addEventListener('click', exportCalendar);
         document.getElementById('export-workload').addEventListener('click', exportWorkload);
+        
+        // FOH Preferences event listeners
+        document.getElementById('add-preference-btn').addEventListener('click', showPreferenceForm);
+        document.getElementById('save-preference').addEventListener('click', savePreference);
+        document.getElementById('cancel-preference').addEventListener('click', hidePreferenceForm);
       }
       
       init();
