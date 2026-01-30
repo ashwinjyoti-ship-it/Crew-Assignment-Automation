@@ -169,6 +169,22 @@ function isManualOnlyVenue(venueRaw: string): { manual: boolean, reason: string 
   return { manual: false, reason: '' }
 }
 
+// Check if venue looks like crew initials (possible column shift in CSV)
+function isSuspiciousVenue(venue: string): boolean {
+  const trimmed = venue.trim()
+  // Known valid short venue codes
+  const validShortCodes = ['JBT', 'TT', 'TET', 'GDT', 'LT', 'DPAG', 'SVR', 'OAP', 'TATA']
+  if (validShortCodes.includes(trimmed.toUpperCase())) return false
+  
+  // Flag if it's 2-4 uppercase letters only (likely crew initials)
+  if (/^[A-Z]{2,4}$/.test(trimmed)) return true
+  
+  // Flag if it looks like a name (starts with capital, has lowercase)
+  if (/^[A-Z][a-z]+$/.test(trimmed) && trimmed.length <= 10) return true
+  
+  return false
+}
+
 // ============================================
 // CREW API
 // ============================================
@@ -288,6 +304,12 @@ app.post('/api/events/upload', async (c) => {
       const manualCheck = isManualOnlyVenue(event.venue || '')
       let manualOnly = manualCheck.manual || isMultiVenue
       let manualReason = manualCheck.reason || (isMultiVenue ? 'Multi-venue event' : '')
+      
+      // Check for suspicious venue (possible CSV column shift)
+      if (isSuspiciousVenue(event.venue || '')) {
+        manualOnly = true
+        manualReason = manualReason ? manualReason + '; Suspicious venue: ' + event.venue : 'Suspicious venue: ' + event.venue + ' (check CSV columns)'
+      }
       
       // No special-casing for any crew member name in sound requirements
       // Assignment follows standard rules based on venue/vertical capabilities
