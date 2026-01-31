@@ -2064,8 +2064,10 @@ app.get('/', (c) => {
         document.getElementById('edit-modal').classList.remove('hidden');
         document.getElementById('edit-modal').classList.add('flex');
         
-        // Setup Smart Swap detection on FOH change
-        document.getElementById('modal-foh').addEventListener('change', handleFohChange);
+        // Setup Smart Swap detection on FOH change (remove old listener first to prevent duplicates)
+        const fohSelect = document.getElementById('modal-foh');
+        fohSelect.removeEventListener('change', handleFohChange);
+        fohSelect.addEventListener('change', handleFohChange);
         document.getElementById('swap-panel').classList.add('hidden');
         
         // Store context for swap detection
@@ -2093,9 +2095,21 @@ app.get('/', (c) => {
           return;
         }
         
-        // Find the event where this crew is currently assigned
+        // Find the event where this crew is currently assigned as FOH
+        // Normalize dates for comparison (handle dd-mm-yyyy vs yyyy-mm-dd)
+        const normalizeDate = (d) => {
+          if (!d) return '';
+          if (d.match(/^\\d{4}-\\d{2}-\\d{2}$/)) return d;
+          if (d.match(/^\\d{2}-\\d{2}-\\d{4}$/)) {
+            const [dd, mm, yyyy] = d.split('-');
+            return yyyy + '-' + mm + '-' + dd;
+          }
+          return d;
+        };
+        const normalizedEventDate = normalizeDate(ctx.eventDate);
+        
         const otherEvent = assignments.find(a => 
-          a.event_date === ctx.eventDate && 
+          normalizeDate(a.event_date) === normalizedEventDate && 
           a.event_id !== ctx.currentEventId &&
           a.foh === newFohId
         );
