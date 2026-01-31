@@ -552,10 +552,32 @@ app.post('/api/assignments/run', async (c) => {
   const assignments: any[] = []
   const conflicts: any[] = []
   
-  // Sort: multi-day first, then by date
+  // Sort: events with FOH preferences first, then multi-day, then by date
+  // This ensures preferred crew are reserved for their specified events
+  const hasMatchingPreference = (event: any): boolean => {
+    return preferences.some((p: any) => {
+      const eventNameLower = event.name.toLowerCase()
+      const prefEventLower = p.eventContains.toLowerCase()
+      const eventMatches = eventNameLower.includes(prefEventLower)
+      const venueMatches = p.venue === event.venue_normalized || 
+                          p.venue === event.venue ||
+                          event.venue_normalized?.toLowerCase().includes(p.venue.toLowerCase())
+      return eventMatches && venueMatches
+    })
+  }
+  
   const sortedEvents = [...events].sort((a, b) => {
+    // Events with preferences come first
+    const aHasPref = hasMatchingPreference(a)
+    const bHasPref = hasMatchingPreference(b)
+    if (aHasPref && !bHasPref) return -1
+    if (!aHasPref && bHasPref) return 1
+    
+    // Then multi-day events
     if (a.event_group && !b.event_group) return -1
     if (!a.event_group && b.event_group) return 1
+    
+    // Then by date
     return a.event_date.localeCompare(b.event_date)
   })
   
