@@ -733,7 +733,8 @@ app.post('/api/assignments/run', async (c) => {
         }
       }
       
-      // If no specialist available, fall back to capable crew (use 3-month workload)
+      // If no specialist available, fall back to capable crew
+      // HYBRID WORKLOAD: Monthly fairness first, 3-month history as tiebreaker
       if (!selectedFOH) {
         const capableCandidates: { crew: CrewMember, score: number }[] = []
         
@@ -744,10 +745,22 @@ app.post('/api/assignments/run', async (c) => {
           const capability = canDoFOH(c, event.venue_normalized, event.vertical)
           if (!capability.can) continue
           
-          // Score based on seniority and 3-month workload
-          const workload = workload3Month[c.id] || 0
-          let score = (3 - LEVEL_ORDER[c.level]) * 100  // Senior=300, Mid=200, Junior=100
-          score -= workload * 5  // Penalize based on 3-month history
+          // HYBRID SCORING:
+          // 1. Primary: Current month workload (lower = better) - weight 1000
+          // 2. Secondary: Seniority bonus - weight 100
+          // 3. Tiebreaker: 3-month history (lower = better) - weight 1
+          const monthlyWorkload = currentMonthWorkload[c.id] || 0
+          const historicalWorkload = workload3Month[c.id] || 0
+          const seniorityBonus = (3 - LEVEL_ORDER[c.level]) * 100  // Senior=300, Mid=200, Junior=100
+          
+          // Score: Start high, subtract penalties
+          // Monthly workload is PRIMARY (1000 points per assignment)
+          // Seniority is SECONDARY (up to 300 points)
+          // Historical is TIEBREAKER (1 point per assignment)
+          let score = 10000  // Base score
+          score -= monthlyWorkload * 1000  // Primary: penalize heavily for current month load
+          score += seniorityBonus  // Secondary: prefer seniors
+          score -= historicalWorkload * 1  // Tiebreaker: slight preference for lower 3-month history
           
           capableCandidates.push({ crew: c, score })
         }
@@ -799,8 +812,8 @@ app.post('/api/assignments/run', async (c) => {
     }
     // If preferenceConflict is true, FOH is left unassigned for manual review
     
-    // ========== STAGE ASSIGNMENT (3-month workload balancing) ==========
-    // Key principle: Workload is PRIMARY driver - everyone shares Stage work fairly
+    // ========== STAGE ASSIGNMENT (Hybrid workload balancing) ==========
+    // Key principle: Monthly fairness first, 3-month history as tiebreaker
     // Seniors do Stage when their total workload is lower than others
     const stageNeeded = event.stage_crew_needed - 1  // -1 because total includes FOH
     if (stageNeeded > 0) {
@@ -811,20 +824,23 @@ app.post('/api/assignments/run', async (c) => {
         if (c.id === eventAssignment.foh) continue
         if (!isAvailable(c.id)) continue
         
-        // Score: WORKLOAD is the primary factor for fair distribution
-        // Lower workload = higher score = more likely to be assigned
-        const workload = workload3Month[c.id] || 0
+        // HYBRID SCORING for Stage (same as FOH):
+        // 1. Primary: Current month workload (lower = better)
+        // 2. Tiebreaker: 3-month history (lower = better)
+        const monthlyWorkload = currentMonthWorkload[c.id] || 0
+        const historicalWorkload = workload3Month[c.id] || 0
         
-        // Start with base score, subtract workload heavily
-        // This ensures lowest-workload crew gets picked regardless of level
-        let score = 500 - (workload * 20)  // Workload dominates
+        let score = 10000  // Base score
+        score -= monthlyWorkload * 1000  // Primary: penalize heavily for current month load
         
         // Small bonus for non-seniors to slightly prefer them when workload is equal
-        // But this is overridden if a senior has significantly lower workload
-        if (!c.stage_only_if_urgent) score += 10  // Slight preference for non-seniors
+        if (!c.stage_only_if_urgent) score += 50
+        
+        // Tiebreaker: 3-month history
+        score -= historicalWorkload * 1
         
         // Outside crew only when internal exhausted (big penalty)
-        if (c.level === 'Hired') score -= 300
+        if (c.level === 'Hired') score -= 5000
         
         stageCandidates.push({ crew: c, score })
       }
