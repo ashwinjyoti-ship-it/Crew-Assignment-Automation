@@ -926,6 +926,393 @@ app.post('/api/assignments/run', async (c) => {
   return c.json({ assignments, conflicts })
 })
 
+// Redo endpoint - reshuffles unlocked assignments with randomized rotation
+app.post('/api/assignments/redo', async (c) => {
+  const { DB } = c.env
+  const { batch_id, foh_preferences, locked_assignments } = await c.req.json()
+  
+  const preferences = foh_preferences || []
+  const locked = locked_assignments || []
+  
+  // Build maps for quick locked lookup
+  const lockedFoh: Record<number, number> = {} // event_id -> crew_id
+  const lockedStage: Record<number, number[]> = {} // event_id -> crew_ids
+  for (const l of locked) {
+    if (l.lock_foh && l.foh) lockedFoh[l.event_id] = l.foh
+    if (l.lock_stage && l.stage?.length) lockedStage[l.event_id] = l.stage
+  }
+  
+  // Get all events
+  const eventsResult = await DB.prepare(
+    'SELECT * FROM events WHERE batch_id = ? ORDER BY event_date, name'
+  ).bind(batch_id).all()
+  const events = eventsResult.results as any[]
+  
+  // Get all crew
+  const crewResult = await DB.prepare('SELECT * FROM crew').all()
+  const crew = crewResult.results.map((c: any) => ({
+    ...c,
+    venue_capabilities: JSON.parse(c.venue_capabilities),
+    vertical_capabilities: JSON.parse(c.vertical_capabilities)
+  })) as CrewMember[]
+  
+  // Current month for workload
+  const currentMonth = events[0]?.event_date?.substring(0, 7) || new Date().toISOString().substring(0, 7)
+  
+  // Get 3-month rolling workload
+  const [year, monthNum] = currentMonth.split('-').map(Number)
+  const threeMonthsAgo = new Date(year, monthNum - 4, 1)
+  const threeMonthStart = `${threeMonthsAgo.getFullYear()}-${String(threeMonthsAgo.getMonth() + 1).padStart(2, '0')}`
+  
+  const workload3MonthResult = await DB.prepare(
+    `SELECT crew_id, SUM(assignment_count) as total FROM workload_history 
+     WHERE month >= ? AND month <= ? GROUP BY crew_id`
+  ).bind(threeMonthStart, currentMonth).all()
+  
+  const workload3Month: Record<number, number> = {}
+  for (const w of workload3MonthResult.results as any[]) {
+    workload3Month[w.crew_id] = w.total
+  }
+  
+  // Build specialist rotation (RANDOMIZED for redo)
+  const verticalSpecialistRotation: Record<string, number[]> = {}
+  const verticalRotationIndex: Record<string, number> = {}
+  
+  for (const c of crew) {
+    if (c.level === 'Hired') continue
+    for (const [vertical, cap] of Object.entries(c.vertical_capabilities)) {
+      if (cap === 'Y*') {
+        if (!verticalSpecialistRotation[vertical]) {
+          verticalSpecialistRotation[vertical] = []
+          verticalRotationIndex[vertical] = 0
+        }
+        verticalSpecialistRotation[vertical].push(c.id)
+      }
+    }
+  }
+  
+  // RANDOMIZE rotation order for redo
+  for (const vertical of Object.keys(verticalSpecialistRotation)) {
+    const arr = verticalSpecialistRotation[vertical]
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]]
+    }
+    // Random starting index
+    verticalRotationIndex[vertical] = Math.floor(Math.random() * arr.length)
+  }
+  
+  const currentMonthWorkload: Record<number, number> = {}
+  const NAREN_MONTHLY_LIMIT = 7
+  const narenCrew = crew.find(c => c.name === 'Naren')
+  const narenId = narenCrew?.id || -1
+  
+  // Get unavailability
+  const unavailResult = await DB.prepare('SELECT crew_id, unavailable_date FROM crew_unavailability').all()
+  const unavailMap: Record<string, Set<number>> = {}
+  for (const u of unavailResult.results as any[]) {
+    if (!unavailMap[u.unavailable_date]) {
+      unavailMap[u.unavailable_date] = new Set()
+    }
+    unavailMap[u.unavailable_date].add(u.crew_id)
+  }
+  
+  // Clear only UNLOCKED assignments
+  const lockedEventIds = [...new Set([...Object.keys(lockedFoh), ...Object.keys(lockedStage)].map(Number))]
+  const allEventIds = events.map(e => e.id)
+  const unlockedEventIds = allEventIds.filter(id => !lockedEventIds.includes(id))
+  
+  // Delete unlocked assignments
+  if (unlockedEventIds.length > 0) {
+    await DB.prepare(`DELETE FROM assignments WHERE event_id IN (${unlockedEventIds.join(',')})`).run()
+  }
+  // For partially locked events, delete unlocked roles
+  for (const eventId of lockedEventIds) {
+    const hasLockedFoh = lockedFoh[eventId] !== undefined
+    const hasLockedStage = lockedStage[eventId] !== undefined
+    
+    if (hasLockedFoh && !hasLockedStage) {
+      await DB.prepare('DELETE FROM assignments WHERE event_id = ? AND role = ?').bind(eventId, 'Stage').run()
+    } else if (!hasLockedFoh && hasLockedStage) {
+      await DB.prepare('DELETE FROM assignments WHERE event_id = ? AND role = ?').bind(eventId, 'FOH').run()
+    }
+    // If both locked, keep everything
+  }
+  
+  const assignments: any[] = []
+  const conflicts: any[] = []
+  const dailyAssignments: Record<string, Set<number>> = {}
+  const multiDayAssignments: Record<string, { foh: number | null, stage: number[] }> = {}
+  
+  // Pre-populate dailyAssignments with locked crew
+  for (const event of events) {
+    const date = event.event_date
+    if (!dailyAssignments[date]) dailyAssignments[date] = new Set()
+    
+    if (lockedFoh[event.id]) {
+      dailyAssignments[date].add(lockedFoh[event.id])
+    }
+    if (lockedStage[event.id]) {
+      for (const crewId of lockedStage[event.id]) {
+        dailyAssignments[date].add(crewId)
+      }
+    }
+  }
+  
+  // Helper: check if crew available on all event dates
+  const isAvailable = (crewId: number, dates: string[]): boolean => {
+    for (const date of dates) {
+      if (unavailMap[date]?.has(crewId)) return false
+      if (dailyAssignments[date]?.has(crewId)) return false
+    }
+    if (crewId === narenId && (currentMonthWorkload[narenId] || 0) >= NAREN_MONTHLY_LIMIT) return false
+    return true
+  }
+  
+  // Sort: preferences first, then multi-day, then by date
+  const hasMatchingPreference = (event: any): boolean => {
+    return preferences.some((p: any) => {
+      const eventNameLower = event.name.toLowerCase()
+      const prefEventLower = p.eventContains.toLowerCase()
+      const eventMatches = eventNameLower.includes(prefEventLower)
+      const venueMatches = p.venue === event.venue_normalized || 
+                          p.venue === event.venue ||
+                          event.venue_normalized?.toLowerCase().includes(p.venue.toLowerCase())
+      return eventMatches && venueMatches
+    })
+  }
+  
+  const sortedEvents = [...events].sort((a, b) => {
+    const aHasPref = hasMatchingPreference(a)
+    const bHasPref = hasMatchingPreference(b)
+    if (aHasPref && !bHasPref) return -1
+    if (!aHasPref && bHasPref) return 1
+    if (a.event_group && !b.event_group) return -1
+    if (!a.event_group && b.event_group) return 1
+    return a.event_date.localeCompare(b.event_date)
+  })
+  
+  for (const event of sortedEvents) {
+    const eventAssignment: any = {
+      event_id: event.id,
+      event_name: event.name,
+      event_date: event.event_date,
+      venue: event.venue,
+      venue_normalized: event.venue_normalized,
+      team: event.team,
+      vertical: event.vertical,
+      sound_requirements: event.sound_requirements,
+      call_time: event.call_time,
+      foh: null,
+      foh_name: null,
+      stage: [],
+      stage_names: [],
+      foh_conflict: false,
+      stage_conflict: false,
+      needs_manual_review: event.needs_manual_review,
+      manual_flag_reason: event.manual_flag_reason
+    }
+    
+    const eventDates = [event.event_date]
+    for (const date of eventDates) {
+      if (!dailyAssignments[date]) dailyAssignments[date] = new Set()
+    }
+    
+    // ========== FOH ASSIGNMENT ==========
+    if (lockedFoh[event.id]) {
+      // Use locked FOH
+      const lockedCrewId = lockedFoh[event.id]
+      const lockedCrewMember = crew.find(c => c.id === lockedCrewId)
+      eventAssignment.foh = lockedCrewId
+      eventAssignment.foh_name = lockedCrewMember?.name
+      eventAssignment.foh_locked = true
+    } else if (event.needs_manual_review) {
+      eventAssignment.foh_conflict = true
+      conflicts.push({
+        event_id: event.id,
+        event_name: event.name,
+        type: 'Manual',
+        reason: event.manual_flag_reason || 'Manual assignment required'
+      })
+    } else {
+      // Standard assignment logic
+      let selectedFOH: CrewMember | null = null
+      let isSpecialistAssignment = false
+      
+      // Check preferences first
+      const matchingPref = preferences.find((p: any) => {
+        const eventNameLower = event.name.toLowerCase()
+        const prefEventLower = p.eventContains.toLowerCase()
+        const eventMatches = eventNameLower.includes(prefEventLower)
+        const venueMatches = p.venue === event.venue_normalized || 
+                            p.venue === event.venue ||
+                            event.venue_normalized?.toLowerCase().includes(p.venue.toLowerCase())
+        return eventMatches && venueMatches
+      })
+      
+      if (matchingPref) {
+        const preferredCrew = crew.find(c => c.id === matchingPref.crewId)
+        if (preferredCrew && isAvailable(preferredCrew.id, eventDates)) {
+          const { can, isSpecialist } = canDoFOH(preferredCrew, event.venue_normalized, event.vertical)
+          if (can) {
+            selectedFOH = preferredCrew
+            isSpecialistAssignment = isSpecialist
+          }
+        }
+        if (!selectedFOH) {
+          conflicts.push({
+            event_id: event.id,
+            event_name: event.name,
+            type: 'FOH',
+            reason: `FOH Preference: ${matchingPref.crewName} unavailable`
+          })
+        }
+      }
+      
+      if (!selectedFOH && !matchingPref) {
+        // Try specialist rotation
+        const specialistIds = verticalSpecialistRotation[event.vertical] || []
+        if (specialistIds.length > 0) {
+          let rotationIndex = verticalRotationIndex[event.vertical] || 0
+          for (let i = 0; i < specialistIds.length; i++) {
+            const idx = (rotationIndex + i) % specialistIds.length
+            const crewId = specialistIds[idx]
+            const candidate = crew.find(c => c.id === crewId)!
+            if (isAvailable(crewId, eventDates)) {
+              const { can } = canDoFOH(candidate, event.venue_normalized, event.vertical)
+              if (can) {
+                selectedFOH = candidate
+                isSpecialistAssignment = true
+                verticalRotationIndex[event.vertical] = (idx + 1) % specialistIds.length
+                break
+              }
+            }
+          }
+        }
+      }
+      
+      if (!selectedFOH && !matchingPref) {
+        // Fallback: capable crew by score
+        const capableCrew = crew.filter(c => {
+          if (c.level === 'Hired') return false
+          if (!isAvailable(c.id, eventDates)) return false
+          const { can } = canDoFOH(c, event.venue_normalized, event.vertical)
+          return can
+        })
+        
+        capableCrew.sort((a, b) => {
+          const aMonthly = currentMonthWorkload[a.id] || 0
+          const bMonthly = currentMonthWorkload[b.id] || 0
+          if (aMonthly !== bMonthly) return aMonthly - bMonthly
+          const aRolling = workload3Month[a.id] || 0
+          const bRolling = workload3Month[b.id] || 0
+          return aRolling - bRolling
+        })
+        
+        if (capableCrew.length > 0) {
+          selectedFOH = capableCrew[0]
+          isSpecialistAssignment = false
+        }
+      }
+      
+      if (selectedFOH) {
+        eventAssignment.foh = selectedFOH.id
+        eventAssignment.foh_name = selectedFOH.name
+        eventAssignment.foh_level = selectedFOH.level
+        eventAssignment.foh_specialist = isSpecialistAssignment
+        
+        for (const date of eventDates) {
+          dailyAssignments[date].add(selectedFOH.id)
+        }
+        currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + 1
+        
+        await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
+      } else if (!event.needs_manual_review && !matchingPref) {
+        eventAssignment.foh_conflict = true
+        conflicts.push({
+          event_id: event.id,
+          event_name: event.name,
+          type: 'FOH',
+          reason: 'No qualified FOH available'
+        })
+      }
+    }
+    
+    // ========== STAGE CREW ASSIGNMENT ==========
+    if (lockedStage[event.id]) {
+      // Use locked stage
+      eventAssignment.stage = lockedStage[event.id]
+      eventAssignment.stage_names = lockedStage[event.id].map(id => crew.find(c => c.id === id)?.name).filter(Boolean)
+      eventAssignment.stage_locked = true
+    } else if (!event.needs_manual_review) {
+      const stageNeeded = (event.stage_crew_needed || 2) - (eventAssignment.foh ? 1 : 0)
+      
+      if (stageNeeded > 0) {
+        const stageCandidates = crew.filter(c => {
+          if (!c.can_stage) return false
+          if (!isAvailable(c.id, eventDates)) return false
+          if (c.id === eventAssignment.foh) return false
+          return true
+        })
+        
+        stageCandidates.sort((a, b) => {
+          const aMonthly = currentMonthWorkload[a.id] || 0
+          const bMonthly = currentMonthWorkload[b.id] || 0
+          if (aMonthly !== bMonthly) return aMonthly - bMonthly
+          
+          const aRolling = workload3Month[a.id] || 0
+          const bRolling = workload3Month[b.id] || 0
+          if (aRolling !== bRolling) return aRolling - bRolling
+          
+          if (a.level === 'Hired' && b.level !== 'Hired') return 1
+          if (b.level === 'Hired' && a.level !== 'Hired') return -1
+          return 0
+        })
+        
+        const internalCrew = stageCandidates.filter(c => c.level !== 'Hired')
+        const outsideCrew = stageCandidates.filter(c => c.level === 'Hired')
+        
+        const selectedStage: number[] = []
+        for (const c of internalCrew) {
+          if (selectedStage.length >= stageNeeded) break
+          selectedStage.push(c.id)
+        }
+        for (const c of outsideCrew) {
+          if (selectedStage.length >= stageNeeded) break
+          if (selectedStage.length === 0 || internalCrew.length > 0) {
+            selectedStage.push(c.id)
+          }
+        }
+        
+        eventAssignment.stage = selectedStage
+        eventAssignment.stage_names = selectedStage.map(id => crew.find(c => c.id === id)?.name).filter(Boolean)
+        
+        for (const crewId of selectedStage) {
+          for (const date of eventDates) {
+            dailyAssignments[date].add(crewId)
+          }
+          currentMonthWorkload[crewId] = (currentMonthWorkload[crewId] || 0) + 1
+          await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, crewId, 'Stage').run()
+        }
+        
+        if (selectedStage.length < stageNeeded) {
+          eventAssignment.stage_conflict = true
+          conflicts.push({
+            event_id: event.id,
+            event_name: event.name,
+            type: 'Stage',
+            reason: `Need ${stageNeeded} stage, only ${selectedStage.length} available`
+          })
+        }
+      }
+    }
+    
+    assignments.push(eventAssignment)
+  }
+  
+  return c.json({ assignments, conflicts })
+})
+
 app.get('/api/assignments', async (c) => {
   const { DB } = c.env
   const batchId = c.req.query('batch_id')
@@ -1330,7 +1717,10 @@ app.get('/', (c) => {
           <div id="assignments-table" class="glass-card-light p-4 max-h-96 overflow-y-auto"></div>
           <div class="flex justify-between mt-6">
             <button id="step4-back" class="btn-secondary px-6 py-3 rounded-xl font-medium"><i class="fas fa-arrow-left mr-2"></i> Back</button>
-            <button id="step4-next" class="btn-primary px-6 py-3 rounded-xl font-medium">Finalize <i class="fas fa-arrow-right ml-2"></i></button>
+            <div class="flex gap-3">
+              <button id="redo-assignments" class="btn-secondary px-6 py-3 rounded-xl font-medium"><i class="fas fa-redo mr-2"></i>Redo Unlocked</button>
+              <button id="step4-next" class="btn-primary px-6 py-3 rounded-xl font-medium">Finalize <i class="fas fa-arrow-right ml-2"></i></button>
+            </div>
           </div>
         </section>
         
@@ -1360,6 +1750,21 @@ app.get('/', (c) => {
           </div>
         </section>
       </main>
+      
+      <!-- Export Preview Modal -->
+      <div id="export-preview-modal" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
+        <div class="glass-card p-6 w-full max-w-4xl mx-4 slide-up max-h-[90vh] flex flex-col">
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-semibold"><i class="fas fa-file-csv text-blue-400 mr-2"></i>Export Preview</h3>
+            <button id="preview-close" class="text-gray-400 hover:text-white"><i class="fas fa-times text-xl"></i></button>
+          </div>
+          <div id="export-preview-table" class="overflow-auto flex-1 mb-4"></div>
+          <div class="flex justify-end gap-3">
+            <button id="preview-cancel" class="btn-secondary px-4 py-2 rounded-xl">Cancel</button>
+            <button id="preview-download" class="btn-primary px-4 py-2 rounded-xl"><i class="fas fa-download mr-2"></i>Download CSV</button>
+          </div>
+        </div>
+      </div>
       
       <!-- Edit Modal -->
       <div id="edit-modal" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
@@ -1426,6 +1831,7 @@ app.get('/', (c) => {
       let assignments = [];
       let conflicts = [];
       let fohPreferences = []; // Batch-only FOH preferences: { eventContains, venue, crewId, crewName }
+      let lockedAssignments = {}; // { eventId: { foh: true/false, stage: true/false } }
       
       // Helper: Convert yyyy-mm-dd to dd-mm-yyyy for display
       function formatDateDisplay(dateStr) {
@@ -1933,13 +2339,16 @@ app.get('/', (c) => {
           document.getElementById('conflicts-section').classList.add('hidden');
         }
         
-        let html = '<table class="w-full text-sm"><thead><tr class="text-muted"><th class="text-left py-2">Event</th><th class="text-left py-2">Date</th><th class="text-left py-2">Venue</th><th class="text-left py-2">Crew</th><th class="py-2"></th></tr></thead><tbody>';
+        let html = '<table class="w-full text-sm"><thead><tr class="text-muted"><th class="text-left py-2">Event</th><th class="text-left py-2">Date</th><th class="text-left py-2">Venue</th><th class="text-left py-2">FOH</th><th class="text-left py-2">Stage</th><th class="py-2"></th></tr></thead><tbody>';
         let lastDate = '';
         for (const a of assignments) {
-          const crewList = [a.foh_name, ...(a.stage_names || [])].filter(Boolean).join(', ');
-          let crewDisplay = crewList || '<span class="conflict-badge">Unassigned</span>';
-          if (a.foh_specialist) crewDisplay = '<span class="specialist-badge mr-1">★</span>' + crewDisplay;
-          if (a.needs_manual_review && !crewList) crewDisplay = '<span class="manual-badge">Manual</span>';
+          const fohDisplay = a.foh_name ? (a.foh_specialist ? '<span class="specialist-badge mr-1">★</span>' + a.foh_name : a.foh_name) : '<span class="conflict-badge">Unassigned</span>';
+          const stageDisplay = (a.stage_names || []).join(', ') || '-';
+          
+          // Lock status
+          const isLocked = lockedAssignments[a.event_id] || {};
+          const fohLockIcon = isLocked.foh ? 'fa-lock text-amber-400' : 'fa-lock-open text-gray-500';
+          const stageLockIcon = isLocked.stage ? 'fa-lock text-amber-400' : 'fa-lock-open text-gray-500';
           
           // Add date divider line when date changes
           const currentDate = a.event_date;
@@ -1950,13 +2359,22 @@ app.get('/', (c) => {
           html += '<td class="py-3">' + a.event_name.substring(0, 30) + (a.event_name.length > 30 ? '...' : '') + '</td>';
           html += '<td class="py-3">' + formatDateDisplay(a.event_date) + '</td>';
           html += '<td class="py-3">' + a.venue + '</td>';
-          html += '<td class="py-3">' + crewDisplay + '</td>';
+          html += '<td class="py-3"><span class="mr-2">' + fohDisplay + '</span><button class="lock-btn opacity-60 hover:opacity-100" data-event-id="' + a.event_id + '" data-type="foh" title="' + (isLocked.foh ? 'Unlock FOH' : 'Lock FOH') + '"><i class="fas ' + fohLockIcon + ' text-xs"></i></button></td>';
+          html += '<td class="py-3"><span class="mr-2">' + stageDisplay + '</span><button class="lock-btn opacity-60 hover:opacity-100" data-event-id="' + a.event_id + '" data-type="stage" title="' + (isLocked.stage ? 'Unlock Stage' : 'Lock Stage') + '"><i class="fas ' + stageLockIcon + ' text-xs"></i></button></td>';
           html += '<td class="py-3"><button class="text-blue-400 hover:text-blue-300 edit-btn" data-event-id="' + a.event_id + '"><i class="fas fa-edit"></i></button></td>';
           html += '</tr>';
         }
         html += '</tbody></table>';
         document.getElementById('assignments-table').innerHTML = html;
         document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', () => openEditModal(parseInt(btn.dataset.eventId))));
+        document.querySelectorAll('.lock-btn').forEach(btn => btn.addEventListener('click', () => toggleLock(parseInt(btn.dataset.eventId), btn.dataset.type)));
+      }
+      
+      function toggleLock(eventId, type) {
+        if (!lockedAssignments[eventId]) lockedAssignments[eventId] = {};
+        lockedAssignments[eventId][type] = !lockedAssignments[eventId][type];
+        renderAssignments();
+      }
       }
       
       async function openEditModal(eventId) {
@@ -2303,7 +2721,90 @@ app.get('/', (c) => {
         document.getElementById('edit-modal').classList.remove('flex');
       }
       
-      function exportCSV() { window.location.href = '/api/export/csv?batch_id=' + batchId; }
+      async function showExportPreview() {
+        // Show preview modal with all assignments
+        let html = '<table class="w-full text-sm"><thead><tr class="text-muted border-b border-white/10"><th class="text-left py-2 px-2">Date</th><th class="text-left py-2 px-2">Program</th><th class="text-left py-2 px-2">Venue</th><th class="text-left py-2 px-2">Crew</th></tr></thead><tbody>';
+        
+        for (const a of assignments) {
+          const crewDisplay = [];
+          if (a.foh_name) crewDisplay.push(a.foh_name + ' (FOH)');
+          if (a.stage_names?.length) crewDisplay.push(a.stage_names.join(', '));
+          
+          html += '<tr class="border-b border-white/5">';
+          html += '<td class="py-2 px-2">' + formatDateDisplay(a.event_date) + '</td>';
+          html += '<td class="py-2 px-2">' + a.event_name.substring(0, 40) + (a.event_name.length > 40 ? '...' : '') + '</td>';
+          html += '<td class="py-2 px-2">' + a.venue + '</td>';
+          html += '<td class="py-2 px-2">' + (crewDisplay.join(', ') || '<span class="text-red-400">Unassigned</span>') + '</td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        
+        document.getElementById('export-preview-table').innerHTML = html;
+        document.getElementById('export-preview-modal').classList.remove('hidden');
+        document.getElementById('export-preview-modal').classList.add('flex');
+      }
+      
+      function closePreviewModal() {
+        document.getElementById('export-preview-modal').classList.add('hidden');
+        document.getElementById('export-preview-modal').classList.remove('flex');
+      }
+      
+      function downloadCSV() {
+        closePreviewModal();
+        window.location.href = '/api/export/csv?batch_id=' + batchId;
+      }
+      
+      async function redoAssignments() {
+        // Build locked assignments data
+        const locked = [];
+        for (const [eventId, locks] of Object.entries(lockedAssignments)) {
+          const a = assignments.find(x => x.event_id === parseInt(eventId));
+          if (!a) continue;
+          if (locks.foh || locks.stage) {
+            locked.push({
+              event_id: parseInt(eventId),
+              lock_foh: locks.foh || false,
+              lock_stage: locks.stage || false,
+              foh: locks.foh ? a.foh : null,
+              stage: locks.stage ? a.stage : []
+            });
+          }
+        }
+        
+        // Show progress
+        document.getElementById('redo-assignments').disabled = true;
+        document.getElementById('redo-assignments').innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Reshuffling...';
+        
+        try {
+          const res = await fetch('/api/assignments/redo', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              batch_id: batchId, 
+              foh_preferences: preferences,
+              locked_assignments: locked
+            })
+          });
+          const data = await res.json();
+          assignments = data.assignments || [];
+          conflicts = data.conflicts || [];
+          
+          // Sort by date then name
+          assignments.sort((a, b) => {
+            const dateCompare = a.event_date.localeCompare(b.event_date);
+            return dateCompare !== 0 ? dateCompare : a.event_name.localeCompare(b.event_name);
+          });
+          
+          renderAssignments();
+        } catch (err) {
+          alert('Failed to redo assignments: ' + err.message);
+        } finally {
+          document.getElementById('redo-assignments').disabled = false;
+          document.getElementById('redo-assignments').innerHTML = '<i class="fas fa-redo mr-2"></i>Redo Unlocked';
+        }
+      }
+      
+      function exportCSV() { showExportPreview(); }
       function exportCalendar() { window.location.href = '/api/export/calendar?batch_id=' + batchId; }
       function exportWorkload() { window.location.href = '/api/export/workload?month=' + formatMonth(currentMonth); }
       
@@ -2353,6 +2854,15 @@ app.get('/', (c) => {
         document.getElementById('export-csv').addEventListener('click', exportCSV);
         document.getElementById('export-calendar').addEventListener('click', exportCalendar);
         document.getElementById('export-workload').addEventListener('click', exportWorkload);
+        
+        // Redo button
+        document.getElementById('redo-assignments').addEventListener('click', redoAssignments);
+        
+        // Export preview modal
+        document.getElementById('preview-close').addEventListener('click', closePreviewModal);
+        document.getElementById('preview-cancel').addEventListener('click', closePreviewModal);
+        document.getElementById('preview-download').addEventListener('click', downloadCSV);
+        document.getElementById('export-preview-modal').addEventListener('click', (e) => { if (e.target.id === 'export-preview-modal') closePreviewModal(); });
         
         // FOH Preferences event listeners
         document.getElementById('add-preference-btn').addEventListener('click', showPreferenceForm);
