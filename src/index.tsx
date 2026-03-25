@@ -1715,6 +1715,16 @@ app.get('/', (c) => {
             <div id="conflicts-list" class="space-y-3"></div>
           </div>
           <div id="assignments-table" class="glass-card-light p-4 max-h-96 overflow-y-auto"></div>
+          
+          <!-- Workload Summary Panel -->
+          <div id="workload-panel" class="mt-4 glass-card-light p-4">
+            <div class="flex items-center justify-between mb-3 cursor-pointer" id="workload-toggle">
+              <h4 class="font-medium text-sm"><i class="fas fa-chart-bar text-blue-400 mr-2"></i>Crew Workload (This Batch)</h4>
+              <i class="fas fa-chevron-down text-gray-400 text-xs" id="workload-chevron"></i>
+            </div>
+            <div id="workload-content" class="text-sm flex flex-wrap gap-3"></div>
+          </div>
+          
           <div class="flex justify-between mt-6">
             <button id="step4-back" class="btn-secondary px-6 py-3 rounded-xl font-medium"><i class="fas fa-arrow-left mr-2"></i> Back</button>
             <div class="flex gap-3">
@@ -1727,7 +1737,7 @@ app.get('/', (c) => {
         <!-- Step 5: Export -->
         <section id="step5" class="glass-card p-8 mb-6 hidden">
           <h2 class="text-xl font-semibold flex items-center gap-3 mb-6"><i class="fas fa-download text-blue-400"></i>Export Assignments</h2>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div class="glass-card-light p-6 text-center hover:border-blue-400/50 transition-all cursor-pointer" id="export-csv">
               <i class="fas fa-file-csv text-4xl text-blue-400 mb-4"></i>
               <h3 class="font-medium mb-2">NCPA Format CSV</h3>
@@ -1738,11 +1748,7 @@ app.get('/', (c) => {
               <h3 class="font-medium mb-2">Calendar Import</h3>
               <p class="text-muted text-sm">Google Calendar format</p>
             </div>
-            <div class="glass-card-light p-6 text-center hover:border-amber-400/50 transition-all cursor-pointer" id="export-workload">
-              <i class="fas fa-chart-bar text-4xl text-amber-400 mb-4"></i>
-              <h3 class="font-medium mb-2">Workload Report</h3>
-              <p class="text-muted text-sm">Crew assignment summary</p>
-            </div>
+
           </div>
           <div class="flex justify-between mt-6">
             <button id="step5-back" class="btn-secondary px-6 py-3 rounded-xl font-medium"><i class="fas fa-arrow-left mr-2"></i> Back to Edit</button>
@@ -2368,6 +2374,48 @@ app.get('/', (c) => {
         document.getElementById('assignments-table').innerHTML = html;
         document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', () => openEditModal(parseInt(btn.dataset.eventId))));
         document.querySelectorAll('.lock-btn').forEach(btn => btn.addEventListener('click', () => toggleLock(parseInt(btn.dataset.eventId), btn.dataset.type)));
+        
+        // Render workload summary
+        renderWorkloadSummary();
+      }
+      
+      function renderWorkloadSummary() {
+        // Count assignments per crew member
+        const workload = {};
+        for (const a of assignments) {
+          if (a.foh_name) {
+            workload[a.foh_name] = (workload[a.foh_name] || 0) + 1;
+          }
+          for (const name of (a.stage_names || [])) {
+            workload[name] = (workload[name] || 0) + 1;
+          }
+        }
+        
+        // Sort by count descending
+        const sorted = Object.entries(workload).sort((a, b) => b[1] - a[1]);
+        
+        if (sorted.length === 0) {
+          document.getElementById('workload-content').innerHTML = '<span class="text-muted">No assignments yet</span>';
+          return;
+        }
+        
+        // Find max/min for color coding
+        const counts = sorted.map(x => x[1]);
+        const maxCount = Math.max(...counts);
+        const minCount = Math.min(...counts);
+        const avgCount = counts.reduce((a, b) => a + b, 0) / counts.length;
+        
+        let html = '';
+        for (const [name, count] of sorted) {
+          // Color: green if below avg, yellow if avg, red if high
+          let colorClass = 'text-teal-400'; // balanced
+          if (count > avgCount + 2) colorClass = 'text-red-400'; // overloaded
+          else if (count > avgCount) colorClass = 'text-amber-400'; // slightly high
+          
+          html += '<span class="px-2 py-1 rounded bg-white/5">' + name + ': <span class="' + colorClass + ' font-medium">' + count + '</span></span>';
+        }
+        
+        document.getElementById('workload-content').innerHTML = html;
       }
       
       function toggleLock(eventId, type) {
@@ -2805,7 +2853,6 @@ app.get('/', (c) => {
       
       function exportCSV() { showExportPreview(); }
       function exportCalendar() { window.location.href = '/api/export/calendar?batch_id=' + batchId; }
-      function exportWorkload() { window.location.href = '/api/export/workload?month=' + formatMonth(currentMonth); }
       
       function goToStep(step) {
         for (let i = 1; i <= 5; i++) {
@@ -2852,7 +2899,15 @@ app.get('/', (c) => {
         
         document.getElementById('export-csv').addEventListener('click', exportCSV);
         document.getElementById('export-calendar').addEventListener('click', exportCalendar);
-        document.getElementById('export-workload').addEventListener('click', exportWorkload);
+        
+        // Workload panel toggle
+        document.getElementById('workload-toggle').addEventListener('click', () => {
+          const content = document.getElementById('workload-content');
+          const chevron = document.getElementById('workload-chevron');
+          content.classList.toggle('hidden');
+          chevron.classList.toggle('fa-chevron-down');
+          chevron.classList.toggle('fa-chevron-up');
+        });
         
         // Redo button
         document.getElementById('redo-assignments').addEventListener('click', redoAssignments);
