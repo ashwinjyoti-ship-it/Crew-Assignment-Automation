@@ -2375,7 +2375,6 @@ app.get('/', (c) => {
         lockedAssignments[eventId][type] = !lockedAssignments[eventId][type];
         renderAssignments();
       }
-      }
       
       async function openEditModal(eventId) {
         const a = assignments.find(x => x.event_id === eventId);
