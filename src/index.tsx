@@ -2828,7 +2828,7 @@ app.get('/', (c) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
               batch_id: batchId, 
-              foh_preferences: preferences,
+              foh_preferences: fohPreferences,
               locked_assignments: locked
             })
           });
