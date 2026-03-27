@@ -1670,12 +1670,13 @@ app.get('/', (c) => {
             <!-- Add Preference Form (hidden by default) -->
             <div id="preference-form" class="glass-card-light p-4 hidden">
               <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-                <div>
+                <div class="relative">
                   <label class="block text-sm text-muted mb-2">Event Name Contains</label>
-                  <input type="text" id="pref-event" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400" placeholder="e.g., SOI, Jazz, Home grown">
+                  <input type="text" id="pref-event" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400" placeholder="Type to search events..." autocomplete="off">
+                  <div id="pref-event-suggestions" class="absolute z-50 w-full mt-1 bg-gray-800 border border-white/20 rounded-lg max-h-48 overflow-y-auto hidden"></div>
                 </div>
                 <div>
-                  <label class="block text-sm text-muted mb-2">Venue</label>
+                  <label class="block text-sm text-muted mb-2">Venue <span id="venue-auto-badge" class="text-xs text-teal-400 hidden">(auto-detected)</span></label>
                   <select id="pref-venue" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
                     <option value="">Select Venue</option>
                     <option value="JBT">JBT</option>
@@ -2186,10 +2187,71 @@ app.get('/', (c) => {
         document.getElementById('pref-event').value = '';
         document.getElementById('pref-venue').value = '';
         document.getElementById('pref-foh').value = '';
+        document.getElementById('venue-auto-badge').classList.add('hidden');
+        document.getElementById('pref-event-suggestions').classList.add('hidden');
       }
       
       function hidePreferenceForm() {
         document.getElementById('preference-form').classList.add('hidden');
+        document.getElementById('pref-event-suggestions').classList.add('hidden');
+      }
+      
+      function handleEventInput(e) {
+        const input = e.target.value.trim().toLowerCase();
+        const suggestionsDiv = document.getElementById('pref-event-suggestions');
+        
+        if (input.length < 2) {
+          suggestionsDiv.classList.add('hidden');
+          return;
+        }
+        
+        // Find matching events from uploadedEvents
+        const matches = uploadedEvents.filter(ev => 
+          ev.name.toLowerCase().includes(input)
+        );
+        
+        // Get unique event names with their venues
+        const uniqueMatches = {};
+        matches.forEach(ev => {
+          const key = ev.name.substring(0, 40);
+          if (!uniqueMatches[key]) {
+            uniqueMatches[key] = { name: ev.name, venue: ev.venue_normalized || ev.venue, rawVenue: ev.venue };
+          }
+        });
+        
+        const matchList = Object.values(uniqueMatches).slice(0, 8);
+        
+        if (matchList.length === 0) {
+          suggestionsDiv.classList.add('hidden');
+          return;
+        }
+        
+        let html = '';
+        matchList.forEach(m => {
+          html += '<div class="px-3 py-2 hover:bg-white/10 cursor-pointer text-sm border-b border-white/5" data-name="' + m.name.replace(/"/g, '&quot;') + '" data-venue="' + m.venue + '">';
+          html += '<span class="text-cream">' + m.name.substring(0, 45) + (m.name.length > 45 ? '...' : '') + '</span>';
+          html += '<span class="text-muted text-xs ml-2">@ ' + m.venue + '</span>';
+          html += '</div>';
+        });
+        
+        suggestionsDiv.innerHTML = html;
+        suggestionsDiv.classList.remove('hidden');
+        
+        // Add click handlers to suggestions
+        suggestionsDiv.querySelectorAll('div').forEach(div => {
+          div.addEventListener('click', () => selectEventSuggestion(div.dataset.name, div.dataset.venue));
+        });
+      }
+      
+      function selectEventSuggestion(name, venue) {
+        // Extract a short search term from the event name (first 2-3 significant words)
+        const words = name.split(/\\s+/).filter(w => w.length > 2 && !['and', 'the', 'for', 'with'].includes(w.toLowerCase()));
+        const searchTerm = words.slice(0, 3).join(' ');
+        
+        document.getElementById('pref-event').value = searchTerm || name.substring(0, 20);
+        document.getElementById('pref-venue').value = venue;
+        document.getElementById('venue-auto-badge').classList.remove('hidden');
+        document.getElementById('pref-event-suggestions').classList.add('hidden');
       }
       
       function savePreference() {
@@ -2922,6 +2984,15 @@ app.get('/', (c) => {
         document.getElementById('add-preference-btn').addEventListener('click', showPreferenceForm);
         document.getElementById('save-preference').addEventListener('click', savePreference);
         document.getElementById('cancel-preference').addEventListener('click', hidePreferenceForm);
+        document.getElementById('pref-event').addEventListener('input', handleEventInput);
+        document.getElementById('pref-event').addEventListener('focus', handleEventInput);
+        
+        // Hide suggestions when clicking outside
+        document.addEventListener('click', (e) => {
+          if (!e.target.closest('#pref-event') && !e.target.closest('#pref-event-suggestions')) {
+            document.getElementById('pref-event-suggestions').classList.add('hidden');
+          }
+        });
       }
       
       init();
