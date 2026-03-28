@@ -2215,7 +2215,7 @@ app.get('/', (c) => {
         matches.forEach(ev => {
           const key = ev.name.substring(0, 40);
           if (!uniqueMatches[key]) {
-            uniqueMatches[key] = { name: ev.name, venue: ev.venue_normalized || ev.venue, rawVenue: ev.venue };
+            uniqueMatches[key] = { name: ev.name, venue: ev.venue_normalized, rawVenue: ev.venue };
           }
         });
         
@@ -2245,7 +2245,7 @@ app.get('/', (c) => {
       
       function selectEventSuggestion(name, venue) {
         // Extract a short search term from the event name (first 2-3 significant words)
-        const words = name.split(/\\s+/).filter(w => w.length > 2 && !['and', 'the', 'for', 'with'].includes(w.toLowerCase()));
+        const words = name.split(/\s+/).filter(w => w.length > 0);
         const searchTerm = words.slice(0, 3).join(' ');
         
         document.getElementById('pref-event').value = searchTerm || name.substring(0, 20);
