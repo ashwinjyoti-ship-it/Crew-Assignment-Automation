@@ -2249,7 +2249,17 @@ app.get('/', (c) => {
         const searchTerm = words.slice(0, 3).join(' ');
         
         document.getElementById('pref-event').value = searchTerm || name.substring(0, 20);
-        document.getElementById('pref-venue').value = venue;
+        const venueSelect = document.getElementById('pref-venue');
+        venueSelect.value = venue;
+        if (!venueSelect.value) {
+          const venueLower = venue.toLowerCase();
+          for (const opt of venueSelect.options) {
+            if (opt.value && venueLower.includes(opt.value.toLowerCase())) {
+              venueSelect.value = opt.value;
+              break;
+            }
+          }
+        }
         document.getElementById('venue-auto-badge').classList.remove('hidden');
         document.getElementById('pref-event-suggestions').classList.add('hidden');
       }
@@ -2283,7 +2293,8 @@ app.get('/', (c) => {
           crewId: parseInt(crewId),
           crewName: crewMember.name
         });
-        
+        console.log('Saved preference:', JSON.stringify(fohPreferences));
+
         hidePreferenceForm();
         renderPreferencesUI();
       }
