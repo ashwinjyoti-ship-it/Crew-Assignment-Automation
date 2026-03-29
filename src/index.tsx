@@ -452,6 +452,17 @@ app.put('/api/events/:id', async (c) => {
 
 const LEVEL_ORDER: Record<string, number> = { 'Senior': 0, 'Mid': 1, 'Junior': 2, 'Hired': 3 }
 
+// Processing priority for venues: higher-priority venues get first pick of available crew
+// on the same date. Uses venue_normalized values.
+const VENUE_PRIORITY: Record<string, number> = {
+  'JBT': 1,
+  'Tata': 2,
+  'Experimental': 3,
+  'Little Theatre': 4,
+  'Godrej Dance': 5,
+}
+const getVenuePriority = (v: string): number => VENUE_PRIORITY[v] ?? 99
+
 function canDoFOH(crew: CrewMember, venue: string, vertical: string): { can: boolean, isSpecialist: boolean } {
   const venueCapability = crew.venue_capabilities[venue]
   const verticalCapability = crew.vertical_capabilities[vertical]
@@ -589,18 +600,22 @@ app.post('/api/assignments/run', async (c) => {
   }
 
   const sortedEvents = [...events].sort((a, b) => {
-    // Events with preferences come first
+    // FOH-preference events first (ensure preferred crew is reserved)
     const aHasPref = hasMatchingPreference(a)
     const bHasPref = hasMatchingPreference(b)
     if (aHasPref && !bHasPref) return -1
     if (!aHasPref && bHasPref) return 1
-    
-    // Then multi-day events
+
+    // Multi-day events next
     if (a.event_group && !b.event_group) return -1
     if (!a.event_group && b.event_group) return 1
-    
+
     // Then by date
-    return a.event_date.localeCompare(b.event_date)
+    const dateDiff = a.event_date.localeCompare(b.event_date)
+    if (dateDiff !== 0) return dateDiff
+
+    // Same date: higher-priority venue gets first pick of crew
+    return getVenuePriority(a.venue_normalized) - getVenuePriority(b.venue_normalized)
   })
   
   for (const event of sortedEvents) {
@@ -940,7 +955,22 @@ app.post('/api/assignments/run', async (c) => {
        ON CONFLICT(crew_id, month) DO UPDATE SET assignment_count = assignment_count + ?`
     ).bind(parseInt(crewId), currentMonth, count, count).run()
   }
-  
+
+  // Self-check: silently verify every slot has required roles; catch anything the main
+  // loop may have missed (edge cases, manual events with stage crew, etc.)
+  for (const a of assignments) {
+    const ev = events.find((e: any) => e.id === a.event_id)
+    const needed = ev?.stage_crew_needed ?? 0
+    if (needed > 0 && !a.foh && !a.foh_conflict) {
+      a.foh_conflict = true
+      conflicts.push({ event_id: a.event_id, event_name: a.event_name, type: 'FOH', reason: 'FOH role unfilled' })
+    }
+    if (needed > 1 && a.stage.length < needed - 1 && !a.stage_conflict) {
+      a.stage_conflict = true
+      conflicts.push({ event_id: a.event_id, event_name: a.event_name, type: 'Stage', reason: `Stage unfilled: ${(a.foh ? 1 : 0) + a.stage.length}/${needed} assigned` })
+    }
+  }
+
   return c.json({ assignments, conflicts })
 })
 
@@ -1103,7 +1133,9 @@ app.post('/api/assignments/redo', async (c) => {
     if (!aHasPref && bHasPref) return 1
     if (a.event_group && !b.event_group) return -1
     if (!a.event_group && b.event_group) return 1
-    return a.event_date.localeCompare(b.event_date)
+    const dateDiff = a.event_date.localeCompare(b.event_date)
+    if (dateDiff !== 0) return dateDiff
+    return getVenuePriority(a.venue_normalized) - getVenuePriority(b.venue_normalized)
   })
   
   for (const event of sortedEvents) {
@@ -1322,7 +1354,21 @@ app.post('/api/assignments/redo', async (c) => {
     
     assignments.push(eventAssignment)
   }
-  
+
+  // Self-check: silently verify every slot has required roles
+  for (const a of assignments) {
+    const ev = events.find((e: any) => e.id === a.event_id)
+    const needed = ev?.stage_crew_needed ?? 0
+    if (needed > 0 && !a.foh && !a.foh_conflict) {
+      a.foh_conflict = true
+      conflicts.push({ event_id: a.event_id, event_name: a.event_name, type: 'FOH', reason: 'FOH role unfilled' })
+    }
+    if (needed > 1 && a.stage.length < needed - 1 && !a.stage_conflict) {
+      a.stage_conflict = true
+      conflicts.push({ event_id: a.event_id, event_name: a.event_name, type: 'Stage', reason: `Stage unfilled: ${(a.foh ? 1 : 0) + a.stage.length}/${needed} assigned` })
+    }
+  }
+
   return c.json({ assignments, conflicts })
 })
 
