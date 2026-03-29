@@ -766,13 +766,14 @@ app.post('/api/assignments/run', async (c) => {
         eventAssignment.foh_name = selectedFOH.name
         eventAssignment.foh_level = selectedFOH.level
         eventAssignment.foh_specialist = isSpecialistAssignment
-        
+        eventAssignment.foh_preference_applied = preferenceApplied
+
         for (const date of eventDates) {
           dailyAssignments[date].add(selectedFOH.id)
         }
         currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + eventDates.length
         workload3Month[selectedFOH.id] = (workload3Month[selectedFOH.id] || 0) + eventDates.length
-        
+
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
       } else {
         eventAssignment.foh_conflict = true
@@ -1202,12 +1203,13 @@ app.post('/api/assignments/redo', async (c) => {
         eventAssignment.foh_name = selectedFOH.name
         eventAssignment.foh_level = selectedFOH.level
         eventAssignment.foh_specialist = isSpecialistAssignment
-        
+        eventAssignment.foh_preference_applied = !!matchingPref && selectedFOH.id === matchingPref.crewId
+
         for (const date of eventDates) {
           dailyAssignments[date].add(selectedFOH.id)
         }
         currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + 1
-        
+
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
       } else if (!event.needs_manual_review && !matchingPref) {
         eventAssignment.foh_conflict = true
@@ -2372,7 +2374,7 @@ app.get('/', (c) => {
         let html = '<table class="w-full text-sm"><thead><tr class="text-muted"><th class="text-left py-2">Event</th><th class="text-left py-2">Date</th><th class="text-left py-2">Venue</th><th class="text-left py-2">FOH</th><th class="text-left py-2">Stage</th><th class="py-2"></th></tr></thead><tbody>';
         let lastDate = '';
         for (const a of assignments) {
-          const fohDisplay = a.foh_name ? (a.foh_specialist ? '<span class="specialist-badge mr-1">★</span>' + a.foh_name : a.foh_name) : '<span class="conflict-badge">Unassigned</span>';
+          const fohDisplay = a.foh_name ? (a.foh_specialist ? '<span class="specialist-badge mr-1">★</span>' + a.foh_name : a.foh_name) + (a.foh_preference_applied ? ' <i class="fas fa-thumbtack text-xs text-teal-400 opacity-80" title="FOH preference applied"></i>' : '') : '<span class="conflict-badge">Unassigned</span>';
           const stageDisplay = (a.stage_names || []).join(', ') || '-';
           
           // Lock status
