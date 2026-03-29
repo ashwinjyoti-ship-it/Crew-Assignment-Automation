@@ -562,7 +562,7 @@ app.post('/api/assignments/run', async (c) => {
   const currentMonthWorkload: Record<number, number> = {}
   
   // Naren's monthly assignment limit (second-in-command with admin duties)
-  const NAREN_MONTHLY_LIMIT = 7
+  const NAREN_MONTHLY_LIMIT = 9
   const narenCrew = crew.find(c => c.name === 'Naren')
   const narenId = narenCrew?.id || -1
   
@@ -588,7 +588,18 @@ app.post('/api/assignments/run', async (c) => {
   
   const assignments: any[] = []
   const conflicts: any[] = []
-  
+
+  // Build map of preferred-FOH crew by date so stage assignment avoids grabbing them
+  const preferredFohByDate: Record<string, Set<number>> = {}
+  for (const pref of preferences) {
+    for (const ev of events) {
+      if (ev.name.toLowerCase().includes(pref.eventContains.toLowerCase())) {
+        if (!preferredFohByDate[ev.event_date]) preferredFohByDate[ev.event_date] = new Set()
+        preferredFohByDate[ev.event_date].add(pref.crewId)
+      }
+    }
+  }
+
   // Sort: events with FOH preferences first, then multi-day, then by date
   // This ensures preferred crew are reserved for their specified events
   const hasMatchingPreference = (event: any): boolean => {
@@ -716,18 +727,26 @@ app.post('/api/assignments/run', async (c) => {
       const preferredCrew = crew.find(c => c.id === matchingPref.crewId)
       if (preferredCrew) {
         if (isAvailable(preferredCrew.id)) {
-          // Preference can be applied
-          selectedFOH = preferredCrew
-          preferenceApplied = true
+          const { can } = canDoFOH(preferredCrew, event.venue_normalized, event.vertical)
+          if (can) {
+            // Preference can be applied
+            selectedFOH = preferredCrew
+            preferenceApplied = true
+          }
+          // else: preferred crew capable but not for this venue — fall through to normal assignment
         } else {
-          // Preferred crew is NOT available - block and flag for manual
+          // Preferred crew is NOT available (day-off, already assigned, or Naren cap)
           preferenceConflict = true
           eventAssignment.foh_conflict = true
+          const narenAtCap = preferredCrew.id === narenId && (currentMonthWorkload[narenId] || 0) >= NAREN_MONTHLY_LIMIT
+          const unavailReason = narenAtCap
+            ? `Naren at monthly cap (${currentMonthWorkload[narenId] || 0}/${NAREN_MONTHLY_LIMIT})`
+            : 'day-off or already assigned'
           conflicts.push({
             event_id: event.id,
             event_name: event.name,
             type: 'FOH Preference',
-            reason: 'Preferred FOH "' + preferredCrew.name + '" is unavailable (day-off or already assigned). Manual assignment required.'
+            reason: `Preferred FOH "${preferredCrew.name}" unavailable (${unavailReason}). Manual assignment required.`
           })
         }
       }
@@ -819,11 +838,22 @@ app.post('/api/assignments/run', async (c) => {
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
       } else {
         eventAssignment.foh_conflict = true
+        let fohConflictReason = 'No qualified FOH available'
+        // If Naren would be capable but is blocked by cap, surface that in the reason
+        if (narenCrew) {
+          const narenMonthly = currentMonthWorkload[narenId] || 0
+          if (narenMonthly >= NAREN_MONTHLY_LIMIT) {
+            const { can } = canDoFOH(narenCrew, event.venue_normalized, event.vertical)
+            if (can) {
+              fohConflictReason = `No qualified FOH available — Naren at monthly cap (${narenMonthly}/${NAREN_MONTHLY_LIMIT}), assign manually`
+            }
+          }
+        }
         conflicts.push({
           event_id: event.id,
           event_name: event.name,
           type: 'FOH',
-          reason: 'No qualified FOH available'
+          reason: fohConflictReason
         })
       }
     } else if (selectedFOH) {
@@ -864,16 +894,21 @@ app.post('/api/assignments/run', async (c) => {
         
         let score = 10000  // Base score
         score -= monthlyWorkload * 1000  // Primary: penalize heavily for current month load
-        
+
         // Small bonus for non-seniors to slightly prefer them when workload is equal
         if (!c.stage_only_if_urgent) score += 50
-        
+
         // Tiebreaker: 3-month history
         score -= historicalWorkload * 1
-        
+
         // Outside crew only when internal exhausted (big penalty)
         if (c.level === 'Hired') score -= 5000
-        
+
+        // Avoid using preferred-FOH crew on stage — they may be needed as FOH for another
+        // event on the same date. Large penalty so they're last resort, not a hard block.
+        const isPreferredFohOnThisDate = eventDates.some(d => preferredFohByDate[d]?.has(c.id))
+        if (isPreferredFohOnThisDate) score -= 8000
+
         stageCandidates.push({ crew: c, score })
       }
       
@@ -1051,10 +1086,10 @@ app.post('/api/assignments/redo', async (c) => {
   }
   
   const currentMonthWorkload: Record<number, number> = {}
-  const NAREN_MONTHLY_LIMIT = 7
+  const NAREN_MONTHLY_LIMIT = 9
   const narenCrew = crew.find(c => c.name === 'Naren')
   const narenId = narenCrew?.id || -1
-  
+
   // Get unavailability
   const unavailResult = await DB.prepare('SELECT crew_id, unavailable_date FROM crew_unavailability').all()
   const unavailMap: Record<string, Set<number>> = {}
@@ -1064,7 +1099,7 @@ app.post('/api/assignments/redo', async (c) => {
     }
     unavailMap[u.unavailable_date].add(u.crew_id)
   }
-  
+
   // Clear only UNLOCKED assignments
   const lockedEventIds = [...new Set([...Object.keys(lockedFoh), ...Object.keys(lockedStage)].map(Number))]
   const allEventIds = events.map(e => e.id)
@@ -1091,7 +1126,18 @@ app.post('/api/assignments/redo', async (c) => {
   const conflicts: any[] = []
   const dailyAssignments: Record<string, Set<number>> = {}
   const multiDayAssignments: Record<string, { foh: number | null, stage: number[] }> = {}
-  
+
+  // Build map of preferred-FOH crew by date to protect them from stage grabs
+  const preferredFohByDate: Record<string, Set<number>> = {}
+  for (const pref of preferences) {
+    for (const ev of events) {
+      if (ev.name.toLowerCase().includes(pref.eventContains.toLowerCase())) {
+        if (!preferredFohByDate[ev.event_date]) preferredFohByDate[ev.event_date] = new Set()
+        preferredFohByDate[ev.event_date].add(pref.crewId)
+      }
+    }
+  }
+
   // Pre-populate dailyAssignments with locked crew
   for (const event of events) {
     const date = event.event_date
@@ -1274,15 +1320,25 @@ app.post('/api/assignments/redo', async (c) => {
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
       } else if (!event.needs_manual_review && !matchingPref) {
         eventAssignment.foh_conflict = true
+        let fohConflictReason = 'No qualified FOH available'
+        if (narenCrew) {
+          const narenMonthly = currentMonthWorkload[narenId] || 0
+          if (narenMonthly >= NAREN_MONTHLY_LIMIT) {
+            const { can } = canDoFOH(narenCrew, event.venue_normalized, event.vertical)
+            if (can) {
+              fohConflictReason = `No qualified FOH available — Naren at monthly cap (${narenMonthly}/${NAREN_MONTHLY_LIMIT}), assign manually`
+            }
+          }
+        }
         conflicts.push({
           event_id: event.id,
           event_name: event.name,
           type: 'FOH',
-          reason: 'No qualified FOH available'
+          reason: fohConflictReason
         })
       }
     }
-    
+
     // ========== STAGE CREW ASSIGNMENT ==========
     if (lockedStage[event.id]) {
       // Use locked stage
@@ -1301,14 +1357,18 @@ app.post('/api/assignments/redo', async (c) => {
         })
         
         stageCandidates.sort((a, b) => {
-          const aMonthly = currentMonthWorkload[a.id] || 0
-          const bMonthly = currentMonthWorkload[b.id] || 0
-          if (aMonthly !== bMonthly) return aMonthly - bMonthly
-          
+          // Preferred-FOH crew get a large effective penalty so they're last resort on stage
+          const aPrefFoh = eventDates.some(d => preferredFohByDate[d]?.has(a.id)) ? 8000 : 0
+          const bPrefFoh = eventDates.some(d => preferredFohByDate[d]?.has(b.id)) ? 8000 : 0
+
+          const aScore = (currentMonthWorkload[a.id] || 0) * 1000 + aPrefFoh
+          const bScore = (currentMonthWorkload[b.id] || 0) * 1000 + bPrefFoh
+          if (aScore !== bScore) return aScore - bScore
+
           const aRolling = workload3Month[a.id] || 0
           const bRolling = workload3Month[b.id] || 0
           if (aRolling !== bRolling) return aRolling - bRolling
-          
+
           if (a.level === 'Hired' && b.level !== 'Hired') return 1
           if (b.level === 'Hired' && a.level !== 'Hired') return -1
           return 0
@@ -2506,14 +2566,16 @@ app.get('/', (c) => {
         const minCount = Math.min(...counts);
         const avgCount = counts.reduce((a, b) => a + b, 0) / counts.length;
         
+        const narenCapLimit = 9;
         let html = '';
         for (const [name, count] of sorted) {
           // Color: green if below avg, yellow if avg, red if high
           let colorClass = 'text-teal-400'; // balanced
           if (count > avgCount + 2) colorClass = 'text-red-400'; // overloaded
           else if (count > avgCount) colorClass = 'text-amber-400'; // slightly high
-          
-          html += '<span class="px-2 py-1 rounded bg-white/5">' + name + ': <span class="' + colorClass + ' font-medium">' + count + '</span></span>';
+
+          const capSuffix = name === 'Naren' ? ' <span class="text-white/40 text-xs">(' + count + '/' + narenCapLimit + ' cap)</span>' : '';
+          html += '<span class="px-2 py-1 rounded bg-white/5">' + name + ': <span class="' + colorClass + ' font-medium">' + count + '</span>' + capSuffix + '</span>';
         }
         
         document.getElementById('workload-content').innerHTML = html;
