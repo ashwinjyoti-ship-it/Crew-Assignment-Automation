@@ -558,14 +558,10 @@ app.post('/api/assignments/run', async (c) => {
     return preferences.some((p: any) => {
       const eventNameLower = event.name.toLowerCase()
       const prefEventLower = p.eventContains.toLowerCase()
-      const eventMatches = eventNameLower.includes(prefEventLower)
-      const venueMatches = p.venue === event.venue_normalized || 
-                          p.venue === event.venue ||
-                          event.venue_normalized?.toLowerCase().includes(p.venue.toLowerCase())
-      return eventMatches && venueMatches
+      return eventNameLower.includes(prefEventLower)
     })
   }
-  
+
   const sortedEvents = [...events].sort((a, b) => {
     // Events with preferences come first
     const aHasPref = hasMatchingPreference(a)
@@ -592,6 +588,7 @@ app.post('/api/assignments/run', async (c) => {
       vertical: event.vertical,
       sound_requirements: event.sound_requirements,
       call_time: event.call_time,
+      event_group: event.event_group || null,
       foh: null,
       foh_name: null,
       stage: [],
@@ -601,7 +598,7 @@ app.post('/api/assignments/run', async (c) => {
       needs_manual_review: event.needs_manual_review,
       manual_flag_reason: event.manual_flag_reason
     }
-    
+
     // Skip auto-assignment for manual-only events
     if (event.needs_manual_review) {
       eventAssignment.foh_conflict = true
@@ -668,17 +665,9 @@ app.post('/api/assignments/run', async (c) => {
     
     // Check for FOH preference match FIRST
     const matchingPref = preferences.find((p: any) => {
-      // Case-insensitive contains match for event name
       const eventNameLower = event.name.toLowerCase()
       const prefEventLower = p.eventContains.toLowerCase()
-      const eventMatches = eventNameLower.includes(prefEventLower)
-      
-      // Venue match (normalize both)
-      const venueMatches = p.venue === event.venue_normalized || 
-                          p.venue === event.venue ||
-                          event.venue_normalized.toLowerCase().includes(p.venue.toLowerCase())
-      
-      return eventMatches && venueMatches
+      return eventNameLower.includes(prefEventLower)
     })
     
     if (matchingPref) {
@@ -1074,11 +1063,7 @@ app.post('/api/assignments/redo', async (c) => {
     return preferences.some((p: any) => {
       const eventNameLower = event.name.toLowerCase()
       const prefEventLower = p.eventContains.toLowerCase()
-      const eventMatches = eventNameLower.includes(prefEventLower)
-      const venueMatches = p.venue === event.venue_normalized || 
-                          p.venue === event.venue ||
-                          event.venue_normalized?.toLowerCase().includes(p.venue.toLowerCase())
-      return eventMatches && venueMatches
+      return eventNameLower.includes(prefEventLower)
     })
   }
   
@@ -1103,6 +1088,7 @@ app.post('/api/assignments/redo', async (c) => {
       vertical: event.vertical,
       sound_requirements: event.sound_requirements,
       call_time: event.call_time,
+      event_group: event.event_group || null,
       foh: null,
       foh_name: null,
       stage: [],
@@ -1112,7 +1098,7 @@ app.post('/api/assignments/redo', async (c) => {
       needs_manual_review: event.needs_manual_review,
       manual_flag_reason: event.manual_flag_reason
     }
-    
+
     const eventDates = [event.event_date]
     for (const date of eventDates) {
       if (!dailyAssignments[date]) dailyAssignments[date] = new Set()
@@ -1143,11 +1129,7 @@ app.post('/api/assignments/redo', async (c) => {
       const matchingPref = preferences.find((p: any) => {
         const eventNameLower = event.name.toLowerCase()
         const prefEventLower = p.eventContains.toLowerCase()
-        const eventMatches = eventNameLower.includes(prefEventLower)
-        const venueMatches = p.venue === event.venue_normalized || 
-                            p.venue === event.venue ||
-                            event.venue_normalized?.toLowerCase().includes(p.venue.toLowerCase())
-        return eventMatches && venueMatches
+        return eventNameLower.includes(prefEventLower)
       })
       
       if (matchingPref) {
@@ -1658,7 +1640,6 @@ app.get('/', (c) => {
                   <tr class="text-muted border-b border-white/10">
                     <th class="text-left py-2 w-8">#</th>
                     <th class="text-left py-2">Event Contains</th>
-                    <th class="text-left py-2">Venue</th>
                     <th class="text-left py-2">FOH Crew</th>
                     <th class="text-left py-2 w-12"></th>
                   </tr>
@@ -1669,23 +1650,11 @@ app.get('/', (c) => {
             
             <!-- Add Preference Form (hidden by default) -->
             <div id="preference-form" class="glass-card-light p-4 hidden">
-              <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
                 <div class="relative">
                   <label class="block text-sm text-muted mb-2">Event Name Contains</label>
                   <input type="text" id="pref-event" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400" placeholder="Type to search events..." autocomplete="off">
                   <div id="pref-event-suggestions" class="absolute z-50 w-full mt-1 bg-gray-800 border border-white/20 rounded-lg max-h-48 overflow-y-auto hidden"></div>
-                </div>
-                <div>
-                  <label class="block text-sm text-muted mb-2">Venue <span id="venue-auto-badge" class="text-xs text-teal-400 hidden">(auto-detected)</span></label>
-                  <select id="pref-venue" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
-                    <option value="">Select Venue</option>
-                    <option value="JBT">JBT</option>
-                    <option value="Tata">Tata</option>
-                    <option value="Experimental">Experimental</option>
-                    <option value="Godrej Dance">Godrej Dance</option>
-                    <option value="Little Theatre">Little Theatre</option>
-                    <option value="Others">Others</option>
-                  </select>
                 </div>
                 <div>
                   <label class="block text-sm text-muted mb-2">FOH Crew</label>
@@ -2185,9 +2154,7 @@ app.get('/', (c) => {
         
         // Clear inputs
         document.getElementById('pref-event').value = '';
-        document.getElementById('pref-venue').value = '';
         document.getElementById('pref-foh').value = '';
-        document.getElementById('venue-auto-badge').classList.add('hidden');
         document.getElementById('pref-event-suggestions').classList.add('hidden');
       }
       
@@ -2247,49 +2214,34 @@ app.get('/', (c) => {
         // Extract a short search term from the event name (first 2-3 significant words)
         const words = name.split(/\s+/).filter(w => w.length > 0);
         const searchTerm = words.slice(0, 3).join(' ');
-        
+
         document.getElementById('pref-event').value = searchTerm || name.substring(0, 20);
-        const venueSelect = document.getElementById('pref-venue');
-        venueSelect.value = venue;
-        if (!venueSelect.value) {
-          const venueLower = venue.toLowerCase();
-          for (const opt of venueSelect.options) {
-            if (opt.value && venueLower.includes(opt.value.toLowerCase())) {
-              venueSelect.value = opt.value;
-              break;
-            }
-          }
-        }
-        document.getElementById('venue-auto-badge').classList.remove('hidden');
         document.getElementById('pref-event-suggestions').classList.add('hidden');
       }
       
       function savePreference() {
         const eventContains = document.getElementById('pref-event').value.trim();
-        const venue = document.getElementById('pref-venue').value;
         const crewId = document.getElementById('pref-foh').value;
-        
-        if (!eventContains || !venue || !crewId) {
-          alert('Please fill in all fields: Event Name, Venue, and FOH Crew');
+
+        if (!eventContains || !crewId) {
+          alert('Please fill in all fields: Event Name and FOH Crew');
           return;
         }
-        
+
         const crewMember = crew.find(c => c.id == crewId);
         if (!crewMember) return;
-        
+
         // Check for duplicate preference
-        const exists = fohPreferences.some(p => 
-          p.eventContains.toLowerCase() === eventContains.toLowerCase() && 
-          p.venue === venue
+        const exists = fohPreferences.some(p =>
+          p.eventContains.toLowerCase() === eventContains.toLowerCase()
         );
         if (exists) {
-          alert('A preference for this Event + Venue combination already exists');
+          alert('A preference for this event name already exists');
           return;
         }
-        
+
         fohPreferences.push({
           eventContains: eventContains,
-          venue: venue,
           crewId: parseInt(crewId),
           crewName: crewMember.name
         });
@@ -2319,7 +2271,6 @@ app.get('/', (c) => {
           html += '<tr class="border-t border-white/5">';
           html += '<td class="py-2 text-muted">' + (idx + 1) + '</td>';
           html += '<td class="py-2"><span class="text-blue-400">' + escapeHtml(p.eventContains) + '</span></td>';
-          html += '<td class="py-2">' + p.venue + '</td>';
           html += '<td class="py-2 font-medium">' + p.crewName + '</td>';
           html += '<td class="py-2"><button class="text-red-400 hover:text-red-300 delete-pref-btn" data-index="' + idx + '"><i class="fas fa-trash-alt"></i></button></td>';
           html += '</tr>';
@@ -2818,8 +2769,11 @@ app.get('/', (c) => {
         }
         
         await fetch('/api/assignments/' + eventId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foh_id: fohId, stage_ids: stageIds }) });
-        
+
         const a = assignments.find(x => x.event_id === eventId);
+        const fohChanged = a ? a.foh !== fohId : true;
+        const stageChanged = a ? JSON.stringify([...a.stage].sort()) !== JSON.stringify([...stageIds].sort()) : true;
+
         if (a) {
           a.foh = fohId;
           a.foh_name = crew.find(c => c.id === fohId)?.name || null;
@@ -2830,10 +2784,43 @@ app.get('/', (c) => {
             return c?.name;
           }).filter(Boolean);
         }
-        
+
         conflicts = conflicts.filter(c => !(c.event_id === eventId && fohId));
+
+        // Propagate changes to multi-day group siblings
+        const currentEventGroup = a?.event_group;
+        let propagatedCount = 0;
+        if (currentEventGroup && (fohChanged || stageChanged)) {
+          const siblings = assignments.filter(x => x.event_id !== eventId && x.event_group === currentEventGroup);
+          for (const sibling of siblings) {
+            const siblingFohId = fohChanged ? fohId : sibling.foh;
+            const siblingStageIds = stageChanged ? stageIds : sibling.stage;
+            await fetch('/api/assignments/' + sibling.event_id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foh_id: siblingFohId, stage_ids: siblingStageIds }) });
+            if (fohChanged) {
+              sibling.foh = fohId;
+              sibling.foh_name = crew.find(c => c.id === fohId)?.name || null;
+              sibling.foh_conflict = !fohId;
+            }
+            if (stageChanged) {
+              sibling.stage = stageIds;
+              sibling.stage_names = stageIds.map(id => crew.find(x => x.id === id)?.name).filter(Boolean);
+            }
+            conflicts = conflicts.filter(c => !(c.event_id === sibling.event_id && fohId));
+            propagatedCount++;
+          }
+        }
+
         closeModal();
         renderAssignments();
+
+        if (propagatedCount > 0) {
+          const total = propagatedCount + 1;
+          const msg = document.createElement('div');
+          msg.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-5 py-2 rounded-xl text-sm shadow-lg z-50';
+          msg.textContent = 'Edit applied to all ' + total + ' dates of this event.';
+          document.body.appendChild(msg);
+          setTimeout(() => msg.remove(), 3000);
+        }
       }
       
       function closeModal() {
