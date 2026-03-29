@@ -308,9 +308,34 @@ app.post('/api/events/upload', async (c) => {
   const insertedEvents = []
   
   for (const [name, groupEvents] of Object.entries(eventGroups)) {
-    const eventGroup = groupEvents.length > 1 ? `group_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` : null
-    
-    for (const event of groupEvents) {
+    // Sort by date and split into consecutive sub-groups only.
+    // Events with the same name but a gap between dates are treated as separate assignments
+    // because crew availability may differ on non-consecutive dates.
+    const withDates = groupEvents.map(e => {
+      let d = e.date || ''
+      if (d.match(/^\d{2}-\d{2}-\d{4}$/)) {
+        const [dd, mm, yyyy] = d.split('-')
+        d = `${yyyy}-${mm}-${dd}`
+      }
+      return { ...e, _sortDate: d }
+    }).sort((a, b) => a._sortDate.localeCompare(b._sortDate))
+
+    const subGroups: any[][] = [[withDates[0]]]
+    for (let i = 1; i < withDates.length; i++) {
+      const prev = new Date(withDates[i - 1]._sortDate)
+      const curr = new Date(withDates[i]._sortDate)
+      const diffDays = Math.round((curr.getTime() - prev.getTime()) / 86400000)
+      if (diffDays === 1) {
+        subGroups[subGroups.length - 1].push(withDates[i])
+      } else {
+        subGroups.push([withDates[i]])
+      }
+    }
+
+    for (const subGroup of subGroups) {
+      const eventGroup = subGroup.length > 1 ? `group_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` : null
+
+      for (const event of subGroup) {
       // Ensure date is in yyyy-mm-dd format for consistent comparison with unavailability
       let eventDate = event.date || ''
       if (eventDate.match(/^\d{2}-\d{2}-\d{4}$/)) {
@@ -376,14 +401,15 @@ app.post('/api/events/upload', async (c) => {
         call_time: event.call_time || '',
         stage_crew_needed: defaultCrew,
         event_group: eventGroup,
-        is_multi_day: groupEvents.length > 1,
-        total_days: groupEvents.length,
+        is_multi_day: subGroup.length > 1,
+        total_days: subGroup.length,
         needs_manual_review: manualOnly,
         manual_flag_reason: manualReason
       })
-    }
+      }  // end for (const event of subGroup)
+    }    // end for (const subGroup of subGroups)
   }
-  
+
   return c.json({ batch_id: batchId, events: insertedEvents })
 })
 
@@ -624,6 +650,7 @@ app.post('/api/assignments/run', async (c) => {
         const existing = multiDayAssignments[event.event_group]
         eventAssignment.foh = existing.foh
         eventAssignment.foh_name = crew.find(c => c.id === existing.foh)?.name
+        eventAssignment.foh_preference_applied = existing.foh_preference_applied || false
         eventAssignment.stage = [...existing.stage]
         eventAssignment.stage_names = existing.stage.map(id => crew.find(c => c.id === id)?.name).filter(Boolean)
         
@@ -766,7 +793,7 @@ app.post('/api/assignments/run', async (c) => {
         eventAssignment.foh_name = selectedFOH.name
         eventAssignment.foh_level = selectedFOH.level
         eventAssignment.foh_specialist = isSpecialistAssignment
-        eventAssignment.foh_preference_applied = preferenceApplied
+        eventAssignment.foh_preference_applied = false
 
         for (const date of eventDates) {
           dailyAssignments[date].add(selectedFOH.id)
@@ -790,7 +817,7 @@ app.post('/api/assignments/run', async (c) => {
       eventAssignment.foh_name = selectedFOH.name
       eventAssignment.foh_level = selectedFOH.level
       eventAssignment.foh_specialist = false
-      eventAssignment.foh_preference = true  // Mark as preference-based assignment
+      eventAssignment.foh_preference_applied = true
       
       for (const date of eventDates) {
         dailyAssignments[date].add(selectedFOH.id)
@@ -898,7 +925,8 @@ app.post('/api/assignments/run', async (c) => {
     if (event.event_group) {
       multiDayAssignments[event.event_group] = {
         foh: eventAssignment.foh,
-        stage: eventAssignment.stage
+        stage: eventAssignment.stage,
+        foh_preference_applied: eventAssignment.foh_preference_applied || false
       }
     }
     
@@ -1143,6 +1171,7 @@ app.post('/api/assignments/redo', async (c) => {
           }
         }
         if (!selectedFOH) {
+          eventAssignment.foh_conflict = true
           conflicts.push({
             event_id: event.id,
             event_name: event.name,
@@ -1808,7 +1837,7 @@ app.get('/', (c) => {
       let batchId = null;
       let assignments = [];
       let conflicts = [];
-      let fohPreferences = []; // Batch-only FOH preferences: { eventContains, venue, crewId, crewName }
+      let fohPreferences = []; // Batch-only FOH preferences: { eventContains, crewId, crewName }
       let lockedAssignments = {}; // { eventId: { foh: true/false, stage: true/false } }
       
       // Helper: Convert yyyy-mm-dd to dd-mm-yyyy for display
