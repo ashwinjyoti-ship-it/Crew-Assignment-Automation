@@ -549,12 +549,12 @@ app.post('/api/assignments/run', async (c) => {
     }
   }
   
-  // Sort specialists: Junior first so they fill specialist-FOH slots before Seniors (institutional rule)
+  // Sort specialists by level (Senior first, then Mid) for initial order
   for (const vertical of Object.keys(verticalSpecialistRotation)) {
     verticalSpecialistRotation[vertical].sort((a, b) => {
       const crewA = crew.find(c => c.id === a)!
       const crewB = crew.find(c => c.id === b)!
-      return LEVEL_ORDER[crewB.level] - LEVEL_ORDER[crewA.level]  // descending: Junior(2) > Mid(1) > Senior(0)
+      return LEVEL_ORDER[crewA.level] - LEVEL_ORDER[crewB.level]
     })
   }
   
@@ -797,19 +797,19 @@ app.post('/api/assignments/run', async (c) => {
           
           // HYBRID SCORING:
           // 1. Primary: Current month workload (lower = better) - weight 1000
-          // 2. Secondary: Junior-load bias - weight 100 (institutional: Jr works most, Sr works least)
+          // 2. Secondary: Seniority bonus - weight 100
           // 3. Tiebreaker: 3-month history (lower = better) - weight 1
           const monthlyWorkload = currentMonthWorkload[c.id] || 0
           const historicalWorkload = workload3Month[c.id] || 0
-          const juniorLoadBias = LEVEL_ORDER[c.level] * 100  // Junior=200, Mid=100, Senior=0
-
+          const seniorityBonus = (3 - LEVEL_ORDER[c.level]) * 100  // Senior=300, Mid=200, Junior=100
+          
           // Score: Start high, subtract penalties
           // Monthly workload is PRIMARY (1000 points per assignment)
-          // Junior bias is SECONDARY (up to 200 points)
+          // Seniority is SECONDARY (up to 300 points)
           // Historical is TIEBREAKER (1 point per assignment)
           let score = 10000  // Base score
           score -= monthlyWorkload * 1000  // Primary: penalize heavily for current month load
-          score += juniorLoadBias  // Secondary: prefer juniors when workloads equal
+          score += seniorityBonus  // Secondary: prefer seniors
           score -= historicalWorkload * 1  // Tiebreaker: slight preference for lower 3-month history
           
           capableCandidates.push({ crew: c, score })
@@ -903,10 +903,6 @@ app.post('/api/assignments/run', async (c) => {
 
         // Outside crew only when internal exhausted (big penalty)
         if (c.level === 'Hired') score -= 5000
-
-        // Junior-load bias: institutional rule — Juniors carry more load than Mid/Seniors
-        // Skip Hired crew (they already sit below internal via -5000 penalty)
-        if (c.level !== 'Hired') score += LEVEL_ORDER[c.level] * 100  // Junior=200, Mid=100, Senior=0
 
         // Avoid using preferred-FOH crew on stage — they may be needed as FOH for another
         // event on the same date. Large penalty so they're last resort, not a hard block.
@@ -1300,9 +1296,7 @@ app.post('/api/assignments/redo', async (c) => {
           if (aMonthly !== bMonthly) return aMonthly - bMonthly
           const aRolling = workload3Month[a.id] || 0
           const bRolling = workload3Month[b.id] || 0
-          if (aRolling !== bRolling) return aRolling - bRolling
-          // Institutional rule: Junior > Mid > Senior when workloads equal
-          return LEVEL_ORDER[b.level] - LEVEL_ORDER[a.level]
+          return aRolling - bRolling
         })
         
         if (capableCrew.length > 0) {
@@ -1377,8 +1371,7 @@ app.post('/api/assignments/redo', async (c) => {
 
           if (a.level === 'Hired' && b.level !== 'Hired') return 1
           if (b.level === 'Hired' && a.level !== 'Hired') return -1
-          // Institutional rule: Junior > Mid > Senior when workloads equal
-          return LEVEL_ORDER[b.level] - LEVEL_ORDER[a.level]
+          return 0
         })
         
         const internalCrew = stageCandidates.filter(c => c.level !== 'Hired')
