@@ -624,6 +624,7 @@ app.post('/api/assignments/run', async (c) => {
         const existing = multiDayAssignments[event.event_group]
         eventAssignment.foh = existing.foh
         eventAssignment.foh_name = crew.find(c => c.id === existing.foh)?.name
+        eventAssignment.foh_preference_applied = existing.foh_preference_applied || false
         eventAssignment.stage = [...existing.stage]
         eventAssignment.stage_names = existing.stage.map(id => crew.find(c => c.id === id)?.name).filter(Boolean)
         
@@ -898,7 +899,8 @@ app.post('/api/assignments/run', async (c) => {
     if (event.event_group) {
       multiDayAssignments[event.event_group] = {
         foh: eventAssignment.foh,
-        stage: eventAssignment.stage
+        stage: eventAssignment.stage,
+        foh_preference_applied: eventAssignment.foh_preference_applied || false
       }
     }
     
@@ -1143,6 +1145,7 @@ app.post('/api/assignments/redo', async (c) => {
           }
         }
         if (!selectedFOH) {
+          eventAssignment.foh_conflict = true
           conflicts.push({
             event_id: event.id,
             event_name: event.name,
@@ -1808,7 +1811,7 @@ app.get('/', (c) => {
       let batchId = null;
       let assignments = [];
       let conflicts = [];
-      let fohPreferences = []; // Batch-only FOH preferences: { eventContains, venue, crewId, crewName }
+      let fohPreferences = []; // Batch-only FOH preferences: { eventContains, crewId, crewName }
       let lockedAssignments = {}; // { eventId: { foh: true/false, stage: true/false } }
       
       // Helper: Convert yyyy-mm-dd to dd-mm-yyyy for display
