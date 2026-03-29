@@ -766,7 +766,7 @@ app.post('/api/assignments/run', async (c) => {
         eventAssignment.foh_name = selectedFOH.name
         eventAssignment.foh_level = selectedFOH.level
         eventAssignment.foh_specialist = isSpecialistAssignment
-        eventAssignment.foh_preference_applied = preferenceApplied
+        eventAssignment.foh_preference_applied = false
 
         for (const date of eventDates) {
           dailyAssignments[date].add(selectedFOH.id)
@@ -790,7 +790,7 @@ app.post('/api/assignments/run', async (c) => {
       eventAssignment.foh_name = selectedFOH.name
       eventAssignment.foh_level = selectedFOH.level
       eventAssignment.foh_specialist = false
-      eventAssignment.foh_preference = true  // Mark as preference-based assignment
+      eventAssignment.foh_preference_applied = true
       
       for (const date of eventDates) {
         dailyAssignments[date].add(selectedFOH.id)
