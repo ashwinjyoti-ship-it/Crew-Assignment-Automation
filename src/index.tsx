@@ -11,9 +11,11 @@ type CrewMember = {
   level: 'Senior' | 'Mid' | 'Junior' | 'Hired'
   can_stage: boolean
   stage_only_if_urgent: boolean
+  is_outside_crew: boolean
   venue_capabilities: Record<string, string>
   vertical_capabilities: Record<string, string>
   special_notes: string
+  monthly_assignment_cap: number | null
 }
 
 type Event = {
@@ -118,46 +120,107 @@ const VENUE_DEFAULTS: Record<string, number> = {
   'Others': 1,
 }
 
-function mapVenue(raw: string): { mapped: string, isMultiVenue: boolean } {
+// ============================================
+// CONFIG SYSTEM
+// ============================================
+
+type AppConfig = {
+  workloadWeightMonthly: number
+  workloadWeightSeniority: number
+  workloadWeightHistorical: number
+  workloadHistoryMonths: number
+  scoreBase: number
+  scoreStageNonurgentBonus: number
+  scoreOcPenalty: number
+  scorePreferredFohPenalty: number
+  venueDefaults: Record<string, number>
+  venueMap: Record<string, string>
+  teamVerticalMap: Record<string, string>
+}
+
+async function loadConfig(DB: D1Database): Promise<AppConfig> {
+  try {
+    const rows = await DB.prepare('SELECT key, value FROM system_config').all()
+    const raw: Record<string, string> = {}
+    for (const r of rows.results as any[]) raw[r.key] = r.value
+    const num = (k: string, fb: number) => raw[k] !== undefined ? parseFloat(raw[k]) : fb
+    const jsn = (k: string, fb: any) => {
+      try { return raw[k] ? JSON.parse(raw[k]) : fb }
+      catch { return fb }
+    }
+    return {
+      workloadWeightMonthly:    num('workload_weight_monthly', 1000),
+      workloadWeightSeniority:  num('workload_weight_seniority', 100),
+      workloadWeightHistorical: num('workload_weight_historical', 1),
+      workloadHistoryMonths:    num('workload_history_months', 3),
+      scoreBase:                num('score_base', 10000),
+      scoreStageNonurgentBonus: num('score_stage_nonurgent_bonus', 50),
+      scoreOcPenalty:           num('score_oc_penalty', 5000),
+      scorePreferredFohPenalty: num('score_preferred_foh_penalty', 8000),
+      venueDefaults:            jsn('venue_defaults', VENUE_DEFAULTS),
+      venueMap:                 jsn('venue_map', VENUE_MAP),
+      teamVerticalMap:          jsn('team_vertical_map', TEAM_TO_VERTICAL),
+    }
+  } catch {
+    // system_config table not yet created (migration pending) — use hardcoded defaults
+    return {
+      workloadWeightMonthly: 1000,
+      workloadWeightSeniority: 100,
+      workloadWeightHistorical: 1,
+      workloadHistoryMonths: 3,
+      scoreBase: 10000,
+      scoreStageNonurgentBonus: 50,
+      scoreOcPenalty: 5000,
+      scorePreferredFohPenalty: 8000,
+      venueDefaults: { ...VENUE_DEFAULTS },
+      venueMap: { ...VENUE_MAP },
+      teamVerticalMap: { ...TEAM_TO_VERTICAL },
+    }
+  }
+}
+
+function mapVenue(raw: string, venueMap?: Record<string, string>): { mapped: string, isMultiVenue: boolean } {
   const trimmed = raw.trim()
-  
+  const map = venueMap || VENUE_MAP
+
   // Check for multi-venue patterns
-  if (trimmed.includes(' & ') || trimmed.includes(',') || 
+  if (trimmed.includes(' & ') || trimmed.includes(',') ||
       (trimmed.includes('TT') && trimmed.includes('TET')) ||
       trimmed.toLowerCase().includes('all lawns') ||
       trimmed.toLowerCase().includes('gardens')) {
     return { mapped: 'Others', isMultiVenue: true }
   }
-  
+
   // Try direct mapping
-  if (VENUE_MAP[trimmed]) {
-    return { mapped: VENUE_MAP[trimmed], isMultiVenue: false }
+  if (map[trimmed]) {
+    return { mapped: map[trimmed], isMultiVenue: false }
   }
-  
+
   // Try partial matches
-  for (const [key, value] of Object.entries(VENUE_MAP)) {
+  for (const [key, value] of Object.entries(map)) {
     if (trimmed.toLowerCase().includes(key.toLowerCase())) {
       return { mapped: value, isMultiVenue: false }
     }
   }
-  
+
   return { mapped: 'Others', isMultiVenue: false }
 }
 
-function mapTeamToVertical(team: string): string {
+function mapTeamToVertical(team: string, teamMap?: Record<string, string>): string {
   const trimmed = team.trim()
-  
-  if (TEAM_TO_VERTICAL[trimmed]) {
-    return TEAM_TO_VERTICAL[trimmed]
+  const map = teamMap || TEAM_TO_VERTICAL
+
+  if (map[trimmed]) {
+    return map[trimmed]
   }
-  
+
   // Try partial matches
-  for (const [key, value] of Object.entries(TEAM_TO_VERTICAL)) {
+  for (const [key, value] of Object.entries(map)) {
     if (trimmed.toLowerCase().includes(key.toLowerCase())) {
       return value
     }
   }
-  
+
   return 'Others'
 }
 
@@ -284,6 +347,7 @@ app.post('/api/unavailability/bulk', async (c) => {
 
 app.post('/api/events/upload', async (c) => {
   const { DB } = c.env
+  const cfg = await loadConfig(DB)
   const { events } = await c.req.json()
   
   const batchId = `batch_${Date.now()}`
@@ -345,10 +409,10 @@ app.post('/api/events/upload', async (c) => {
       }
       
       // Map venue
-      const { mapped: venue, isMultiVenue } = mapVenue(event.venue || '')
-      
+      const { mapped: venue, isMultiVenue } = mapVenue(event.venue || '', cfg.venueMap)
+
       // Map team to vertical
-      const vertical = mapTeamToVertical(event.team || '')
+      const vertical = mapTeamToVertical(event.team || '', cfg.teamVerticalMap)
       
       // Check manual-only conditions
       const manualCheck = isManualOnlyVenue(event.venue || '')
@@ -367,7 +431,7 @@ app.post('/api/events/upload', async (c) => {
       // Assignment follows standard rules based on venue/vertical capabilities
       
       // Default crew count - suspicious venues get 1 crew (not 0)
-      const defaultCrew = isSuspicious ? 1 : (manualOnly ? 0 : (VENUE_DEFAULTS[venue] || 1))
+      const defaultCrew = isSuspicious ? 1 : (manualOnly ? 0 : (cfg.venueDefaults[venue] || 1))
       
       const result = await DB.prepare(
         `INSERT INTO events (batch_id, name, event_date, venue, venue_normalized, team, vertical, sound_requirements, call_time, stage_crew_needed, event_group, needs_manual_review, manual_flag_reason) 
@@ -491,34 +555,42 @@ function canDoFOH(crew: CrewMember, venue: string, vertical: string): { can: boo
 
 app.post('/api/assignments/run', async (c) => {
   const { DB } = c.env
+  const cfg = await loadConfig(DB)
   const { batch_id, foh_preferences } = await c.req.json()
-  
-  // FOH Preferences: array of { eventContains, venue, crewId, crewName }
-  const preferences = foh_preferences || []
-  
+
+  // Load persistent FOH preferences from DB, then merge session preferences (lower priority)
+  const dbPrefsResult = await DB.prepare(
+    'SELECT fp.*, c.name as crew_name FROM foh_preferences fp JOIN crew c ON fp.crew_id = c.id WHERE fp.is_active = 1'
+  ).all()
+  const dbPrefs = (dbPrefsResult.results as any[]).map(p => ({ ...p, eventContains: p.event_name_contains }))
+  const sessionPrefs = (foh_preferences || []).map((p: any) => ({ ...p, match_mode: p.match_mode || 'contains', venue_filter: p.venue_filter || null }))
+  // DB preferences take priority; session prefs are appended (for batch-specific one-offs)
+  const preferences = [...dbPrefs, ...sessionPrefs]
+
   // Get all events
   const eventsResult = await DB.prepare(
     'SELECT * FROM events WHERE batch_id = ? ORDER BY event_date, name'
   ).bind(batch_id).all()
   const events = eventsResult.results as any[]
-  
-  // Get all crew (exclude Hired from FOH)
+
+  // Get all crew
   const crewResult = await DB.prepare('SELECT * FROM crew').all()
   const crew = crewResult.results.map((c: any) => ({
     ...c,
     venue_capabilities: JSON.parse(c.venue_capabilities),
     vertical_capabilities: JSON.parse(c.vertical_capabilities)
   })) as CrewMember[]
-  
+
   // Get current month for specialist rotation
   const currentMonth = events[0]?.event_date?.substring(0, 7) || new Date().toISOString().substring(0, 7)
-  
+
   // ========== TWO-TIER WORKLOAD SYSTEM ==========
-  
-  // 1. Get 3-month rolling workload for OVERALL balancing
+
+  // 1. Get rolling workload history for OVERALL balancing (configurable window)
   const [year, monthNum] = currentMonth.split('-').map(Number)
-  const threeMonthsAgo = new Date(year, monthNum - 4, 1)  // 3 months back
-  const threeMonthStart = `${threeMonthsAgo.getFullYear()}-${String(threeMonthsAgo.getMonth() + 1).padStart(2, '0')}`
+  const historyMonthsBack = cfg.workloadHistoryMonths + 1
+  const historyStart = new Date(year, monthNum - historyMonthsBack, 1)
+  const threeMonthStart = `${historyStart.getFullYear()}-${String(historyStart.getMonth() + 1).padStart(2, '0')}`
   
   const workload3MonthResult = await DB.prepare(
     `SELECT crew_id, SUM(assignment_count) as total FROM workload_history 
@@ -560,12 +632,7 @@ app.post('/api/assignments/run', async (c) => {
   
   // Track current month workload (for updating at end)
   const currentMonthWorkload: Record<number, number> = {}
-  
-  // Naren's monthly assignment limit (second-in-command with admin duties)
-  const NAREN_MONTHLY_LIMIT = 9
-  const narenCrew = crew.find(c => c.name === 'Naren')
-  const narenId = narenCrew?.id || -1
-  
+
   // Get unavailability
   const unavailResult = await DB.prepare('SELECT crew_id, unavailable_date FROM crew_unavailability').all()
   const unavailMap: Record<string, Set<number>> = {}
@@ -589,11 +656,22 @@ app.post('/api/assignments/run', async (c) => {
   const assignments: any[] = []
   const conflicts: any[] = []
 
+  // Helper: check if a preference matches an event (supports match_mode + venue_filter)
+  const prefMatchesEvent = (p: any, ev: any): boolean => {
+    const prefText = (p.event_name_contains || p.eventContains || '').toLowerCase()
+    if (!prefText) return false
+    const nameMatch = p.match_mode === 'exact'
+      ? ev.name.toLowerCase() === prefText
+      : ev.name.toLowerCase().includes(prefText)
+    const venueMatch = !p.venue_filter || ev.venue_normalized === p.venue_filter
+    return nameMatch && venueMatch
+  }
+
   // Build map of preferred-FOH crew by date so stage assignment avoids grabbing them
   const preferredFohByDate: Record<string, Set<number>> = {}
   for (const pref of preferences) {
     for (const ev of events) {
-      if (ev.name.toLowerCase().includes(pref.eventContains.toLowerCase())) {
+      if (prefMatchesEvent(pref, ev)) {
         if (!preferredFohByDate[ev.event_date]) preferredFohByDate[ev.event_date] = new Set()
         preferredFohByDate[ev.event_date].add(pref.crewId)
       }
@@ -603,11 +681,7 @@ app.post('/api/assignments/run', async (c) => {
   // Sort: events with FOH preferences first, then multi-day, then by date
   // This ensures preferred crew are reserved for their specified events
   const hasMatchingPreference = (event: any): boolean => {
-    return preferences.some((p: any) => {
-      const eventNameLower = event.name.toLowerCase()
-      const prefEventLower = p.eventContains.toLowerCase()
-      return eventNameLower.includes(prefEventLower)
-    })
+    return preferences.some((p: any) => prefMatchesEvent(p, event))
   }
 
   const sortedEvents = [...events].sort((a, b) => {
@@ -702,57 +776,59 @@ app.post('/api/assignments/run', async (c) => {
         if (unavailMap[date]?.has(crewId)) return false
         if (dailyAssignments[date]?.has(crewId)) return false
       }
-      // Check Naren's monthly limit (admin duties cap)
-      if (crewId === narenId) {
-        const narenCurrentMonth = currentMonthWorkload[narenId] || 0
-        if (narenCurrentMonth >= NAREN_MONTHLY_LIMIT) return false
+      // Generalised per-crew monthly cap (replaces hardcoded Naren-only limit)
+      const crewMember = crew.find(c => c.id === crewId)
+      if (crewMember?.monthly_assignment_cap != null) {
+        if ((currentMonthWorkload[crewId] || 0) >= crewMember.monthly_assignment_cap) return false
       }
       return true
     }
-    
+
     // ========== FOH ASSIGNMENT (Two-tier workload) ==========
     let selectedFOH: CrewMember | null = null
     let isSpecialistAssignment = false
-    let preferenceApplied = false
     let preferenceConflict = false
-    
+
     // Check for FOH preference match FIRST
-    const matchingPref = preferences.find((p: any) => {
-      const eventNameLower = event.name.toLowerCase()
-      const prefEventLower = p.eventContains.toLowerCase()
-      return eventNameLower.includes(prefEventLower)
-    })
-    
+    const matchingPref = preferences.find((p: any) => prefMatchesEvent(p, event))
+
     if (matchingPref) {
       const preferredCrew = crew.find(c => c.id === matchingPref.crewId)
       if (preferredCrew) {
         if (isAvailable(preferredCrew.id)) {
           const { can } = canDoFOH(preferredCrew, event.venue_normalized, event.vertical)
           if (can) {
-            // Preference can be applied
             selectedFOH = preferredCrew
-            preferenceApplied = true
+          } else {
+            // BUG 1 FIX: crew is available but cannot do FOH for this venue/vertical — explicit conflict
+            preferenceConflict = true
+            eventAssignment.foh_conflict = true
+            conflicts.push({
+              event_id: event.id,
+              event_name: event.name,
+              type: 'FOH Preference',
+              reason: `Preferred FOH "${preferredCrew.name}" cannot do FOH at ${event.venue_normalized} / ${event.vertical} — check capability matrix. Assign manually.`
+            })
           }
-          // else: preferred crew capable but not for this venue — fall through to normal assignment
         } else {
-          // Preferred crew is NOT available (day-off, already assigned, or Naren cap)
+          // Crew unavailable (day-off, already assigned, or at monthly cap)
           preferenceConflict = true
           eventAssignment.foh_conflict = true
-          const narenAtCap = preferredCrew.id === narenId && (currentMonthWorkload[narenId] || 0) >= NAREN_MONTHLY_LIMIT
-          const unavailReason = narenAtCap
-            ? `Naren at monthly cap (${currentMonthWorkload[narenId] || 0}/${NAREN_MONTHLY_LIMIT})`
-            : 'day-off or already assigned'
+          const cap = preferredCrew.monthly_assignment_cap
+          const capMsg = cap != null && (currentMonthWorkload[preferredCrew.id] || 0) >= cap
+            ? ` (at monthly cap ${currentMonthWorkload[preferredCrew.id] || 0}/${cap})`
+            : ' (day-off or already assigned)'
           conflicts.push({
             event_id: event.id,
             event_name: event.name,
             type: 'FOH Preference',
-            reason: `Preferred FOH "${preferredCrew.name}" unavailable (${unavailReason}). Manual assignment required.`
+            reason: `Preferred FOH "${preferredCrew.name}" unavailable${capMsg}. Assign manually.`
           })
         }
       }
     }
-    
-    // Skip normal FOH logic if preference was applied or there's a preference conflict
+
+    // BUG 3 FIX: skip normal FOH logic if any preference matched (applied OR conflict)
     if (!selectedFOH && !preferenceConflict) {
       // Get specialists for this vertical
       const specialistIds = verticalSpecialistRotation[event.vertical] || []
@@ -762,66 +838,47 @@ app.post('/api/assignments/run', async (c) => {
         const venueCapability = c.venue_capabilities[event.venue_normalized]
         return venueCapability && venueCapability !== 'N'
       })
-      
+
       // Try specialist rotation first (same-month cycling)
       if (availableSpecialists.length > 0) {
-        // Get current rotation index for this vertical
         const rotationIdx = verticalRotationIndex[event.vertical] || 0
-        
-        // Find next available specialist in rotation
         for (let i = 0; i < availableSpecialists.length; i++) {
           const idx = (rotationIdx + i) % availableSpecialists.length
           const candidateId = availableSpecialists[idx]
           const candidate = crew.find(c => c.id === candidateId)!
-          
           selectedFOH = candidate
           isSpecialistAssignment = true
-          
-          // Advance rotation index for next specialist event of same vertical
           verticalRotationIndex[event.vertical] = (idx + 1) % availableSpecialists.length
           break
         }
       }
-      
-      // If no specialist available, fall back to capable crew
-      // HYBRID WORKLOAD: Monthly fairness first, 3-month history as tiebreaker
+
+      // If no specialist available, fall back to capable crew with hybrid scoring
       if (!selectedFOH) {
         const capableCandidates: { crew: CrewMember, score: number }[] = []
-        
+
         for (const c of crew) {
           if (c.level === 'Hired') continue
           if (!isAvailable(c.id)) continue
-          
           const capability = canDoFOH(c, event.venue_normalized, event.vertical)
           if (!capability.can) continue
-          
-          // HYBRID SCORING:
-          // 1. Primary: Current month workload (lower = better) - weight 1000
-          // 2. Secondary: Seniority bonus - weight 100
-          // 3. Tiebreaker: 3-month history (lower = better) - weight 1
+
           const monthlyWorkload = currentMonthWorkload[c.id] || 0
           const historicalWorkload = workload3Month[c.id] || 0
-          const seniorityBonus = (3 - LEVEL_ORDER[c.level]) * 100  // Senior=300, Mid=200, Junior=100
-          
-          // Score: Start high, subtract penalties
-          // Monthly workload is PRIMARY (1000 points per assignment)
-          // Seniority is SECONDARY (up to 300 points)
-          // Historical is TIEBREAKER (1 point per assignment)
-          let score = 10000  // Base score
-          score -= monthlyWorkload * 1000  // Primary: penalize heavily for current month load
-          score += seniorityBonus  // Secondary: prefer seniors
-          score -= historicalWorkload * 1  // Tiebreaker: slight preference for lower 3-month history
-          
+          const seniorityBonus = (3 - LEVEL_ORDER[c.level]) * cfg.workloadWeightSeniority
+
+          let score = cfg.scoreBase
+          score -= monthlyWorkload * cfg.workloadWeightMonthly
+          score += seniorityBonus
+          score -= historicalWorkload * cfg.workloadWeightHistorical
+
           capableCandidates.push({ crew: c, score })
         }
-        
+
         capableCandidates.sort((a, b) => b.score - a.score)
-        
-        if (capableCandidates.length > 0) {
-          selectedFOH = capableCandidates[0].crew
-        }
+        if (capableCandidates.length > 0) selectedFOH = capableCandidates[0].crew
       }
-      
+
       if (selectedFOH) {
         eventAssignment.foh = selectedFOH.id
         eventAssignment.foh_name = selectedFOH.name
@@ -829,85 +886,59 @@ app.post('/api/assignments/run', async (c) => {
         eventAssignment.foh_specialist = isSpecialistAssignment
         eventAssignment.foh_preference_applied = false
 
-        for (const date of eventDates) {
-          dailyAssignments[date].add(selectedFOH.id)
-        }
+        for (const date of eventDates) dailyAssignments[date].add(selectedFOH.id)
         currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + eventDates.length
         workload3Month[selectedFOH.id] = (workload3Month[selectedFOH.id] || 0) + eventDates.length
-
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
       } else {
         eventAssignment.foh_conflict = true
-        let fohConflictReason = 'No qualified FOH available'
-        // If Naren would be capable but is blocked by cap, surface that in the reason
-        if (narenCrew) {
-          const narenMonthly = currentMonthWorkload[narenId] || 0
-          if (narenMonthly >= NAREN_MONTHLY_LIMIT) {
-            const { can } = canDoFOH(narenCrew, event.venue_normalized, event.vertical)
-            if (can) {
-              fohConflictReason = `No qualified FOH available — Naren at monthly cap (${narenMonthly}/${NAREN_MONTHLY_LIMIT}), assign manually`
-            }
-          }
-        }
-        conflicts.push({
-          event_id: event.id,
-          event_name: event.name,
-          type: 'FOH',
-          reason: fohConflictReason
+        // Surface helpful cap messages for any capped crew who could have done FOH
+        const crewAtCap = crew.find(c => {
+          if (!c.monthly_assignment_cap) return false
+          return canDoFOH(c, event.venue_normalized, event.vertical).can &&
+            (currentMonthWorkload[c.id] || 0) >= c.monthly_assignment_cap
         })
+        const reason = crewAtCap
+          ? `No qualified FOH available — ${crewAtCap.name} at monthly cap (${currentMonthWorkload[crewAtCap.id] || 0}/${crewAtCap.monthly_assignment_cap}). Assign manually.`
+          : 'No qualified FOH available. Assign manually.'
+        conflicts.push({ event_id: event.id, event_name: event.name, type: 'FOH', reason })
       }
     } else if (selectedFOH) {
-      // Preference was applied - record the FOH assignment
+      // Preference was applied successfully
       eventAssignment.foh = selectedFOH.id
       eventAssignment.foh_name = selectedFOH.name
       eventAssignment.foh_level = selectedFOH.level
       eventAssignment.foh_specialist = false
       eventAssignment.foh_preference_applied = true
-      
-      for (const date of eventDates) {
-        dailyAssignments[date].add(selectedFOH.id)
-      }
+
+      for (const date of eventDates) dailyAssignments[date].add(selectedFOH.id)
       currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + eventDates.length
       workload3Month[selectedFOH.id] = (workload3Month[selectedFOH.id] || 0) + eventDates.length
-      
       await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
     }
     // If preferenceConflict is true, FOH is left unassigned for manual review
-    
+
     // ========== STAGE ASSIGNMENT (Hybrid workload balancing) ==========
-    // Key principle: Monthly fairness first, 3-month history as tiebreaker
-    // Seniors do Stage when their total workload is lower than others
     const stageNeeded = event.stage_crew_needed - 1  // -1 because total includes FOH
     if (stageNeeded > 0) {
       const stageCandidates: { crew: CrewMember, score: number }[] = []
-      
+
       for (const c of crew) {
         if (!c.can_stage) continue
         if (c.id === eventAssignment.foh) continue
         if (!isAvailable(c.id)) continue
-        
-        // HYBRID SCORING for Stage (same as FOH):
-        // 1. Primary: Current month workload (lower = better)
-        // 2. Tiebreaker: 3-month history (lower = better)
+
         const monthlyWorkload = currentMonthWorkload[c.id] || 0
         const historicalWorkload = workload3Month[c.id] || 0
-        
-        let score = 10000  // Base score
-        score -= monthlyWorkload * 1000  // Primary: penalize heavily for current month load
 
-        // Small bonus for non-seniors to slightly prefer them when workload is equal
-        if (!c.stage_only_if_urgent) score += 50
+        let score = cfg.scoreBase
+        score -= monthlyWorkload * cfg.workloadWeightMonthly
+        if (!c.stage_only_if_urgent) score += cfg.scoreStageNonurgentBonus
+        score -= historicalWorkload * cfg.workloadWeightHistorical
+        if (c.level === 'Hired') score -= cfg.scoreOcPenalty
 
-        // Tiebreaker: 3-month history
-        score -= historicalWorkload * 1
-
-        // Outside crew only when internal exhausted (big penalty)
-        if (c.level === 'Hired') score -= 5000
-
-        // Avoid using preferred-FOH crew on stage — they may be needed as FOH for another
-        // event on the same date. Large penalty so they're last resort, not a hard block.
         const isPreferredFohOnThisDate = eventDates.some(d => preferredFohByDate[d]?.has(c.id))
-        if (isPreferredFohOnThisDate) score -= 8000
+        if (isPreferredFohOnThisDate) score -= cfg.scorePreferredFohPenalty
 
         stageCandidates.push({ crew: c, score })
       }
@@ -1012,11 +1043,19 @@ app.post('/api/assignments/run', async (c) => {
 // Redo endpoint - reshuffles unlocked assignments with randomized rotation
 app.post('/api/assignments/redo', async (c) => {
   const { DB } = c.env
+  const cfg = await loadConfig(DB)
   const { batch_id, foh_preferences, locked_assignments } = await c.req.json()
-  
-  const preferences = foh_preferences || []
+
+  // Load persistent FOH preferences from DB, then merge session preferences (lower priority)
+  const dbPrefsResult = await DB.prepare(
+    'SELECT fp.*, c.name as crew_name FROM foh_preferences fp JOIN crew c ON fp.crew_id = c.id WHERE fp.is_active = 1'
+  ).all()
+  const dbPrefs = (dbPrefsResult.results as any[]).map(p => ({ ...p, eventContains: p.event_name_contains }))
+  const sessionPrefs = (foh_preferences || []).map((p: any) => ({ ...p, match_mode: p.match_mode || 'contains', venue_filter: p.venue_filter || null }))
+  const preferences = [...dbPrefs, ...sessionPrefs]
+
   const locked = locked_assignments || []
-  
+
   // Build maps for quick locked lookup
   const lockedFoh: Record<number, number> = {} // event_id -> crew_id
   const lockedStage: Record<number, number[]> = {} // event_id -> crew_ids
@@ -1024,13 +1063,13 @@ app.post('/api/assignments/redo', async (c) => {
     if (l.lock_foh && l.foh) lockedFoh[l.event_id] = l.foh
     if (l.lock_stage && l.stage?.length) lockedStage[l.event_id] = l.stage
   }
-  
+
   // Get all events
   const eventsResult = await DB.prepare(
     'SELECT * FROM events WHERE batch_id = ? ORDER BY event_date, name'
   ).bind(batch_id).all()
   const events = eventsResult.results as any[]
-  
+
   // Get all crew
   const crewResult = await DB.prepare('SELECT * FROM crew').all()
   const crew = crewResult.results.map((c: any) => ({
@@ -1038,14 +1077,15 @@ app.post('/api/assignments/redo', async (c) => {
     venue_capabilities: JSON.parse(c.venue_capabilities),
     vertical_capabilities: JSON.parse(c.vertical_capabilities)
   })) as CrewMember[]
-  
+
   // Current month for workload
   const currentMonth = events[0]?.event_date?.substring(0, 7) || new Date().toISOString().substring(0, 7)
-  
-  // Get 3-month rolling workload
+
+  // Get rolling workload history (configurable window)
   const [year, monthNum] = currentMonth.split('-').map(Number)
-  const threeMonthsAgo = new Date(year, monthNum - 4, 1)
-  const threeMonthStart = `${threeMonthsAgo.getFullYear()}-${String(threeMonthsAgo.getMonth() + 1).padStart(2, '0')}`
+  const historyMonthsBack = cfg.workloadHistoryMonths + 1
+  const historyStartRedo = new Date(year, monthNum - historyMonthsBack, 1)
+  const threeMonthStart = `${historyStartRedo.getFullYear()}-${String(historyStartRedo.getMonth() + 1).padStart(2, '0')}`
   
   const workload3MonthResult = await DB.prepare(
     `SELECT crew_id, SUM(assignment_count) as total FROM workload_history 
@@ -1086,9 +1126,6 @@ app.post('/api/assignments/redo', async (c) => {
   }
   
   const currentMonthWorkload: Record<number, number> = {}
-  const NAREN_MONTHLY_LIMIT = 9
-  const narenCrew = crew.find(c => c.name === 'Naren')
-  const narenId = narenCrew?.id || -1
 
   // Get unavailability
   const unavailResult = await DB.prepare('SELECT crew_id, unavailable_date FROM crew_unavailability').all()
@@ -1127,11 +1164,22 @@ app.post('/api/assignments/redo', async (c) => {
   const dailyAssignments: Record<string, Set<number>> = {}
   const multiDayAssignments: Record<string, { foh: number | null, stage: number[] }> = {}
 
+  // Helper: check if a preference matches an event (supports match_mode + venue_filter)
+  const prefMatchesEvent = (p: any, ev: any): boolean => {
+    const prefText = (p.event_name_contains || p.eventContains || '').toLowerCase()
+    if (!prefText) return false
+    const nameMatch = p.match_mode === 'exact'
+      ? ev.name.toLowerCase() === prefText
+      : ev.name.toLowerCase().includes(prefText)
+    const venueMatch = !p.venue_filter || ev.venue_normalized === p.venue_filter
+    return nameMatch && venueMatch
+  }
+
   // Build map of preferred-FOH crew by date to protect them from stage grabs
   const preferredFohByDate: Record<string, Set<number>> = {}
   for (const pref of preferences) {
     for (const ev of events) {
-      if (ev.name.toLowerCase().includes(pref.eventContains.toLowerCase())) {
+      if (prefMatchesEvent(pref, ev)) {
         if (!preferredFohByDate[ev.event_date]) preferredFohByDate[ev.event_date] = new Set()
         preferredFohByDate[ev.event_date].add(pref.crewId)
       }
@@ -1142,34 +1190,29 @@ app.post('/api/assignments/redo', async (c) => {
   for (const event of events) {
     const date = event.event_date
     if (!dailyAssignments[date]) dailyAssignments[date] = new Set()
-    
-    if (lockedFoh[event.id]) {
-      dailyAssignments[date].add(lockedFoh[event.id])
-    }
+    if (lockedFoh[event.id]) dailyAssignments[date].add(lockedFoh[event.id])
     if (lockedStage[event.id]) {
-      for (const crewId of lockedStage[event.id]) {
-        dailyAssignments[date].add(crewId)
-      }
+      for (const crewId of lockedStage[event.id]) dailyAssignments[date].add(crewId)
     }
   }
-  
+
   // Helper: check if crew available on all event dates
   const isAvailable = (crewId: number, dates: string[]): boolean => {
     for (const date of dates) {
       if (unavailMap[date]?.has(crewId)) return false
       if (dailyAssignments[date]?.has(crewId)) return false
     }
-    if (crewId === narenId && (currentMonthWorkload[narenId] || 0) >= NAREN_MONTHLY_LIMIT) return false
+    // Generalised per-crew monthly cap
+    const crewMember = crew.find(c => c.id === crewId)
+    if (crewMember?.monthly_assignment_cap != null) {
+      if ((currentMonthWorkload[crewId] || 0) >= crewMember.monthly_assignment_cap) return false
+    }
     return true
   }
-  
+
   // Sort: preferences first, then multi-day, then by date
   const hasMatchingPreference = (event: any): boolean => {
-    return preferences.some((p: any) => {
-      const eventNameLower = event.name.toLowerCase()
-      const prefEventLower = p.eventContains.toLowerCase()
-      return eventNameLower.includes(prefEventLower)
-    })
+    return preferences.some((p: any) => prefMatchesEvent(p, event))
   }
   
   const sortedEvents = [...events].sort((a, b) => {
@@ -1231,181 +1274,177 @@ app.post('/api/assignments/redo', async (c) => {
       // Standard assignment logic
       let selectedFOH: CrewMember | null = null
       let isSpecialistAssignment = false
-      
+      let preferenceConflict = false
+
       // Check preferences first
-      const matchingPref = preferences.find((p: any) => {
-        const eventNameLower = event.name.toLowerCase()
-        const prefEventLower = p.eventContains.toLowerCase()
-        return eventNameLower.includes(prefEventLower)
-      })
-      
+      const matchingPref = preferences.find((p: any) => prefMatchesEvent(p, event))
+
       if (matchingPref) {
         const preferredCrew = crew.find(c => c.id === matchingPref.crewId)
-        if (preferredCrew && isAvailable(preferredCrew.id, eventDates)) {
-          const { can, isSpecialist } = canDoFOH(preferredCrew, event.venue_normalized, event.vertical)
-          if (can) {
-            selectedFOH = preferredCrew
-            isSpecialistAssignment = isSpecialist
+        if (preferredCrew) {
+          if (isAvailable(preferredCrew.id, eventDates)) {
+            const { can, isSpecialist } = canDoFOH(preferredCrew, event.venue_normalized, event.vertical)
+            if (can) {
+              selectedFOH = preferredCrew
+              isSpecialistAssignment = isSpecialist
+            } else {
+              // BUG 1 FIX: crew available but cannot do FOH for this venue/vertical — explicit conflict
+              preferenceConflict = true
+              eventAssignment.foh_conflict = true
+              conflicts.push({
+                event_id: event.id,
+                event_name: event.name,
+                type: 'FOH Preference',
+                reason: `Preferred FOH "${preferredCrew.name}" cannot do FOH at ${event.venue_normalized} / ${event.vertical} — check capability matrix. Assign manually.`
+              })
+            }
+          } else {
+            // Crew unavailable
+            preferenceConflict = true
+            eventAssignment.foh_conflict = true
+            const cap = preferredCrew.monthly_assignment_cap
+            const capMsg = cap != null && (currentMonthWorkload[preferredCrew.id] || 0) >= cap
+              ? ` (at monthly cap ${currentMonthWorkload[preferredCrew.id] || 0}/${cap})`
+              : ' (day-off or already assigned)'
+            conflicts.push({
+              event_id: event.id,
+              event_name: event.name,
+              type: 'FOH Preference',
+              reason: `Preferred FOH "${preferredCrew.name}" unavailable${capMsg}. Assign manually.`
+            })
           }
         }
-        if (!selectedFOH) {
-          eventAssignment.foh_conflict = true
-          conflicts.push({
-            event_id: event.id,
-            event_name: event.name,
-            type: 'FOH',
-            reason: `FOH Preference: ${matchingPref.crewName} unavailable`
-          })
-        }
       }
-      
-      if (!selectedFOH && !matchingPref) {
+
+      // BUG 3 FIX: skip normal FOH logic if any preference matched (applied OR conflict)
+      if (!selectedFOH && !preferenceConflict) {
         // Try specialist rotation
         const specialistIds = verticalSpecialistRotation[event.vertical] || []
-        if (specialistIds.length > 0) {
-          let rotationIndex = verticalRotationIndex[event.vertical] || 0
-          for (let i = 0; i < specialistIds.length; i++) {
-            const idx = (rotationIndex + i) % specialistIds.length
-            const crewId = specialistIds[idx]
-            const candidate = crew.find(c => c.id === crewId)!
-            if (isAvailable(crewId, eventDates)) {
-              const { can } = canDoFOH(candidate, event.venue_normalized, event.vertical)
-              if (can) {
-                selectedFOH = candidate
-                isSpecialistAssignment = true
-                verticalRotationIndex[event.vertical] = (idx + 1) % specialistIds.length
-                break
-              }
+        for (let i = 0; i < specialistIds.length; i++) {
+          const rotIdx = verticalRotationIndex[event.vertical] || 0
+          const idx = (rotIdx + i) % specialistIds.length
+          const crewId = specialistIds[idx]
+          const candidate = crew.find(c => c.id === crewId)!
+          if (isAvailable(crewId, eventDates)) {
+            const { can } = canDoFOH(candidate, event.venue_normalized, event.vertical)
+            if (can) {
+              selectedFOH = candidate
+              isSpecialistAssignment = true
+              verticalRotationIndex[event.vertical] = (idx + 1) % specialistIds.length
+              break
             }
           }
         }
-      }
-      
-      if (!selectedFOH && !matchingPref) {
-        // Fallback: capable crew by score
-        const capableCrew = crew.filter(c => {
-          if (c.level === 'Hired') return false
-          if (!isAvailable(c.id, eventDates)) return false
-          const { can } = canDoFOH(c, event.venue_normalized, event.vertical)
-          return can
-        })
-        
-        capableCrew.sort((a, b) => {
-          const aMonthly = currentMonthWorkload[a.id] || 0
-          const bMonthly = currentMonthWorkload[b.id] || 0
-          if (aMonthly !== bMonthly) return aMonthly - bMonthly
-          const aRolling = workload3Month[a.id] || 0
-          const bRolling = workload3Month[b.id] || 0
-          return aRolling - bRolling
-        })
-        
-        if (capableCrew.length > 0) {
-          selectedFOH = capableCrew[0]
-          isSpecialistAssignment = false
+
+        if (!selectedFOH) {
+          // Fallback: hybrid scoring
+          const capableCandidates: { crew: CrewMember, score: number }[] = []
+          for (const c of crew) {
+            if (c.level === 'Hired') continue
+            if (!isAvailable(c.id, eventDates)) continue
+            const { can } = canDoFOH(c, event.venue_normalized, event.vertical)
+            if (!can) continue
+            const monthlyWorkload = currentMonthWorkload[c.id] || 0
+            const historicalWorkload = workload3Month[c.id] || 0
+            const seniorityBonus = (3 - LEVEL_ORDER[c.level]) * cfg.workloadWeightSeniority
+            let score = cfg.scoreBase
+            score -= monthlyWorkload * cfg.workloadWeightMonthly
+            score += seniorityBonus
+            score -= historicalWorkload * cfg.workloadWeightHistorical
+            capableCandidates.push({ crew: c, score })
+          }
+          capableCandidates.sort((a, b) => b.score - a.score)
+          if (capableCandidates.length > 0) selectedFOH = capableCandidates[0].crew
         }
-      }
-      
-      if (selectedFOH) {
+
+        if (selectedFOH) {
+          eventAssignment.foh = selectedFOH.id
+          eventAssignment.foh_name = selectedFOH.name
+          eventAssignment.foh_level = selectedFOH.level
+          eventAssignment.foh_specialist = isSpecialistAssignment
+          eventAssignment.foh_preference_applied = false
+          for (const date of eventDates) dailyAssignments[date].add(selectedFOH.id)
+          currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + 1
+          await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
+        } else {
+          eventAssignment.foh_conflict = true
+          const crewAtCap = crew.find(c => {
+            if (!c.monthly_assignment_cap) return false
+            return canDoFOH(c, event.venue_normalized, event.vertical).can &&
+              (currentMonthWorkload[c.id] || 0) >= c.monthly_assignment_cap
+          })
+          const reason = crewAtCap
+            ? `No qualified FOH available — ${crewAtCap.name} at monthly cap. Assign manually.`
+            : 'No qualified FOH available. Assign manually.'
+          conflicts.push({ event_id: event.id, event_name: event.name, type: 'FOH', reason })
+        }
+      } else if (selectedFOH) {
+        // Preference was applied successfully
         eventAssignment.foh = selectedFOH.id
         eventAssignment.foh_name = selectedFOH.name
         eventAssignment.foh_level = selectedFOH.level
         eventAssignment.foh_specialist = isSpecialistAssignment
-        eventAssignment.foh_preference_applied = !!matchingPref && selectedFOH.id === matchingPref.crewId
-
-        for (const date of eventDates) {
-          dailyAssignments[date].add(selectedFOH.id)
-        }
+        eventAssignment.foh_preference_applied = true
+        for (const date of eventDates) dailyAssignments[date].add(selectedFOH.id)
         currentMonthWorkload[selectedFOH.id] = (currentMonthWorkload[selectedFOH.id] || 0) + 1
-
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
-      } else if (!event.needs_manual_review && !matchingPref) {
-        eventAssignment.foh_conflict = true
-        let fohConflictReason = 'No qualified FOH available'
-        if (narenCrew) {
-          const narenMonthly = currentMonthWorkload[narenId] || 0
-          if (narenMonthly >= NAREN_MONTHLY_LIMIT) {
-            const { can } = canDoFOH(narenCrew, event.venue_normalized, event.vertical)
-            if (can) {
-              fohConflictReason = `No qualified FOH available — Naren at monthly cap (${narenMonthly}/${NAREN_MONTHLY_LIMIT}), assign manually`
-            }
-          }
-        }
-        conflicts.push({
-          event_id: event.id,
-          event_name: event.name,
-          type: 'FOH',
-          reason: fohConflictReason
-        })
       }
     }
 
     // ========== STAGE CREW ASSIGNMENT ==========
     if (lockedStage[event.id]) {
-      // Use locked stage
       eventAssignment.stage = lockedStage[event.id]
       eventAssignment.stage_names = lockedStage[event.id].map(id => crew.find(c => c.id === id)?.name).filter(Boolean)
       eventAssignment.stage_locked = true
     } else if (!event.needs_manual_review) {
       const stageNeeded = (event.stage_crew_needed || 2) - (eventAssignment.foh ? 1 : 0)
-      
+
       if (stageNeeded > 0) {
-        const stageCandidates = crew.filter(c => {
-          if (!c.can_stage) return false
-          if (!isAvailable(c.id, eventDates)) return false
-          if (c.id === eventAssignment.foh) return false
-          return true
-        })
-        
-        stageCandidates.sort((a, b) => {
-          // Preferred-FOH crew get a large effective penalty so they're last resort on stage
-          const aPrefFoh = eventDates.some(d => preferredFohByDate[d]?.has(a.id)) ? 8000 : 0
-          const bPrefFoh = eventDates.some(d => preferredFohByDate[d]?.has(b.id)) ? 8000 : 0
+        const stageCandidates: { crew: CrewMember, score: number }[] = []
+        for (const c of crew) {
+          if (!c.can_stage) continue
+          if (!isAvailable(c.id, eventDates)) continue
+          if (c.id === eventAssignment.foh) continue
 
-          const aScore = (currentMonthWorkload[a.id] || 0) * 1000 + aPrefFoh
-          const bScore = (currentMonthWorkload[b.id] || 0) * 1000 + bPrefFoh
-          if (aScore !== bScore) return aScore - bScore
+          const monthlyWorkload = currentMonthWorkload[c.id] || 0
+          const historicalWorkload = workload3Month[c.id] || 0
+          let score = cfg.scoreBase
+          score -= monthlyWorkload * cfg.workloadWeightMonthly
+          if (!c.stage_only_if_urgent) score += cfg.scoreStageNonurgentBonus
+          score -= historicalWorkload * cfg.workloadWeightHistorical
+          if (c.level === 'Hired') score -= cfg.scoreOcPenalty
+          const isPreferredFoh = eventDates.some(d => preferredFohByDate[d]?.has(c.id))
+          if (isPreferredFoh) score -= cfg.scorePreferredFohPenalty
+          stageCandidates.push({ crew: c, score })
+        }
+        stageCandidates.sort((a, b) => b.score - a.score)
 
-          const aRolling = workload3Month[a.id] || 0
-          const bRolling = workload3Month[b.id] || 0
-          if (aRolling !== bRolling) return aRolling - bRolling
-
-          if (a.level === 'Hired' && b.level !== 'Hired') return 1
-          if (b.level === 'Hired' && a.level !== 'Hired') return -1
-          return 0
-        })
-        
-        const internalCrew = stageCandidates.filter(c => c.level !== 'Hired')
-        const outsideCrew = stageCandidates.filter(c => c.level === 'Hired')
-        
+        const internalCrew = stageCandidates.filter(c => c.crew.level !== 'Hired')
+        const outsideCrew = stageCandidates.filter(c => c.crew.level === 'Hired')
         const selectedStage: number[] = []
-        for (const c of internalCrew) {
+
+        for (const { crew: c } of internalCrew) {
           if (selectedStage.length >= stageNeeded) break
           selectedStage.push(c.id)
         }
-        for (const c of outsideCrew) {
+        for (const { crew: c } of outsideCrew) {
           if (selectedStage.length >= stageNeeded) break
-          if (selectedStage.length === 0 || internalCrew.length > 0) {
-            selectedStage.push(c.id)
-          }
+          selectedStage.push(c.id)
         }
-        
+
         eventAssignment.stage = selectedStage
         eventAssignment.stage_names = selectedStage.map(id => crew.find(c => c.id === id)?.name).filter(Boolean)
-        
+
         for (const crewId of selectedStage) {
-          for (const date of eventDates) {
-            dailyAssignments[date].add(crewId)
-          }
+          for (const date of eventDates) dailyAssignments[date].add(crewId)
           currentMonthWorkload[crewId] = (currentMonthWorkload[crewId] || 0) + 1
           await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, crewId, 'Stage').run()
         }
-        
+
         if (selectedStage.length < stageNeeded) {
           eventAssignment.stage_conflict = true
           conflicts.push({
-            event_id: event.id,
-            event_name: event.name,
-            type: 'Stage',
+            event_id: event.id, event_name: event.name, type: 'Stage',
             reason: `Need ${stageNeeded} stage, only ${selectedStage.length} available`
           })
         }
@@ -1627,6 +1666,308 @@ app.get('/api/export/workload', async (c) => {
 })
 
 // ============================================
+// ADMIN API
+// ============================================
+
+// --- Config CRUD ---
+
+app.get('/api/config', async (c) => {
+  const { DB } = c.env
+  try {
+    const rows = await DB.prepare('SELECT key, value, description, config_type, updated_at FROM system_config ORDER BY key').all()
+    return c.json(rows.results)
+  } catch {
+    return c.json([]) // table not yet created
+  }
+})
+
+app.put('/api/config/:key', async (c) => {
+  const { DB } = c.env
+  const key = c.req.param('key')
+  const { value } = await c.req.json()
+  if (value === undefined || value === null) return c.json({ error: 'value required' }, 400)
+
+  // Fetch type for validation
+  const row = await DB.prepare('SELECT config_type FROM system_config WHERE key = ?').bind(key).first() as any
+  if (!row) return c.json({ error: 'Config key not found' }, 404)
+
+  if (row.config_type === 'number') {
+    if (isNaN(parseFloat(String(value)))) return c.json({ error: 'Value must be a valid number' }, 400)
+  }
+  if (row.config_type === 'json') {
+    try { JSON.parse(String(value)) } catch { return c.json({ error: 'Value must be valid JSON' }, 400) }
+  }
+
+  await DB.prepare('UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?')
+    .bind(String(value), key).run()
+  return c.json({ success: true, key, value })
+})
+
+// Per-crew monthly cap
+app.put('/api/crew/:id/cap', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'))
+  const { cap } = await c.req.json()
+  const capVal = cap === null || cap === '' ? null : parseInt(String(cap))
+  if (cap !== null && cap !== '' && isNaN(capVal as number)) return c.json({ error: 'cap must be a number or null' }, 400)
+  await DB.prepare('UPDATE crew SET monthly_assignment_cap = ? WHERE id = ?').bind(capVal, id).run()
+  return c.json({ success: true, id, cap: capVal })
+})
+
+// --- Persistent FOH Preferences CRUD ---
+
+app.get('/api/preferences', async (c) => {
+  const { DB } = c.env
+  try {
+    const rows = await DB.prepare(
+      `SELECT fp.*, c.name as crew_name FROM foh_preferences fp
+       JOIN crew c ON fp.crew_id = c.id
+       ORDER BY fp.created_at DESC`
+    ).all()
+    return c.json(rows.results)
+  } catch {
+    return c.json([])
+  }
+})
+
+app.post('/api/preferences', async (c) => {
+  const { DB } = c.env
+  const { event_name_contains, crew_id, venue_filter, match_mode } = await c.req.json()
+  if (!event_name_contains || !crew_id) return c.json({ error: 'event_name_contains and crew_id required' }, 400)
+  const result = await DB.prepare(
+    `INSERT INTO foh_preferences (event_name_contains, crew_id, venue_filter, match_mode) VALUES (?, ?, ?, ?)`
+  ).bind(event_name_contains.trim(), crew_id, venue_filter || null, match_mode || 'contains').run()
+  return c.json({ success: true, id: (result as any).meta?.last_row_id })
+})
+
+app.put('/api/preferences/:id', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  const { event_name_contains, crew_id, venue_filter, match_mode, is_active } = await c.req.json()
+  const fields: string[] = []
+  const values: any[] = []
+  if (event_name_contains !== undefined) { fields.push('event_name_contains = ?'); values.push(event_name_contains) }
+  if (crew_id !== undefined) { fields.push('crew_id = ?'); values.push(crew_id) }
+  if (venue_filter !== undefined) { fields.push('venue_filter = ?'); values.push(venue_filter || null) }
+  if (match_mode !== undefined) { fields.push('match_mode = ?'); values.push(match_mode) }
+  if (is_active !== undefined) { fields.push('is_active = ?'); values.push(is_active ? 1 : 0) }
+  if (fields.length === 0) return c.json({ error: 'Nothing to update' }, 400)
+  values.push(id)
+  await DB.prepare(`UPDATE foh_preferences SET ${fields.join(', ')} WHERE id = ?`).bind(...values).run()
+  return c.json({ success: true })
+})
+
+app.delete('/api/preferences/:id', async (c) => {
+  const { DB } = c.env
+  const id = c.req.param('id')
+  await DB.prepare('DELETE FROM foh_preferences WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
+// --- History Import ---
+
+// Minimal server-side CSV parser
+function parseCSVServer(text: string): Record<string, string>[] {
+  const lines = text.split(/\r?\n/).filter(l => l.trim())
+  if (lines.length < 2) return []
+  const headers = parseCSVLine(lines[0]).map(h => h.trim().toLowerCase())
+  const rows: Record<string, string>[] = []
+  for (let i = 1; i < lines.length; i++) {
+    const vals = parseCSVLine(lines[i])
+    const row: Record<string, string> = {}
+    headers.forEach((h, idx) => { row[h] = vals[idx]?.trim() || '' })
+    rows.push(row)
+  }
+  return rows
+}
+
+function parseCSVLine(line: string): string[] {
+  const result: string[] = []
+  let current = ''
+  let inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') { current += '"'; i++ }
+      else inQuotes = !inQuotes
+    } else if (ch === ',' && !inQuotes) {
+      result.push(current); current = ''
+    } else {
+      current += ch
+    }
+  }
+  result.push(current)
+  return result
+}
+
+app.post('/api/history/import/preview', async (c) => {
+  const { DB } = c.env
+  const cfg = await loadConfig(DB)
+  const { csv_text } = await c.req.json()
+  if (!csv_text) return c.json({ error: 'csv_text required' }, 400)
+
+  const rows = parseCSVServer(csv_text)
+  const crewResult = await DB.prepare('SELECT id, name, level FROM crew').all()
+  const allCrew = crewResult.results as any[]
+
+  // Normalise crew name for matching
+  const normName = (n: string) => n.toLowerCase().replace(/\s+/g, ' ').trim()
+  const crewByNorm: Map<string, any> = new Map(allCrew.map(c => [normName(c.name), c]))
+
+  const matchName = (raw: string): any | null => {
+    const n = normName(raw)
+    if (!n) return null
+    if (crewByNorm.has(n)) return crewByNorm.get(n)
+    // Partial match
+    for (const [key, crew] of crewByNorm.entries()) {
+      if (n.includes(key) || key.includes(n)) return crew
+    }
+    return null
+  }
+
+  const parsedRows: any[] = []
+  const unmatchedNames = new Set<string>()
+
+  for (const row of rows) {
+    const dateRaw = row['date'] || ''
+    let eventDate = dateRaw.trim()
+    // Normalise date to yyyy-mm-dd
+    if (eventDate.match(/^\d{2}-\d{2}-\d{4}$/)) {
+      const [dd, mm, yyyy] = eventDate.split('-')
+      eventDate = `${yyyy}-${mm}-${dd}`
+    }
+    if (!eventDate.match(/^\d{4}-\d{2}-\d{2}$/)) continue
+
+    const eventName = row['program'] || row['name'] || row['event'] || ''
+    const venueRaw = row['venue'] || ''
+    const teamRaw = row['team'] || ''
+    const crewRaw = row['crew'] || ''
+
+    const venueNormalized = mapVenue(venueRaw, cfg.venueMap).mapped
+    const vertical = mapTeamToVertical(teamRaw, cfg.teamVerticalMap)
+
+    // Parse crew column — comma separated names
+    const crewNames = crewRaw.split(',').map(n => n.trim()).filter(Boolean)
+    const matched: any[] = []
+
+    for (let i = 0; i < crewNames.length; i++) {
+      const name = crewNames[i]
+      const c = matchName(name)
+      if (c) {
+        if (c.level === 'Hired') continue // skip OC crew
+        matched.push({ crew_id: c.id, name: c.name, role_guess: i === 0 ? 'FOH' : 'Stage' })
+      } else {
+        unmatchedNames.add(name)
+      }
+    }
+
+    if (matched.length > 0) {
+      parsedRows.push({
+        date: eventDate,
+        event_name: eventName,
+        venue_normalized: venueNormalized,
+        vertical,
+        crew_raw: crewRaw,
+        matched,
+        unmatched_names: crewNames.filter(n => !matchName(n))
+      })
+    }
+  }
+
+  return c.json({
+    parsed_rows: parsedRows,
+    unmatched: [...unmatchedNames],
+    total_csv_rows: rows.length,
+    matched_rows: parsedRows.length
+  })
+})
+
+app.post('/api/history/import/commit', async (c) => {
+  const { DB } = c.env
+  // assignments: [{crew_id, month, role}] (month = 'YYYY-MM')
+  const { assignments, mode } = await c.req.json()
+  if (!assignments || !Array.isArray(assignments)) return c.json({ error: 'assignments array required' }, 400)
+
+  // Aggregate by (crew_id, month)
+  const totals: Record<string, number> = {}
+  for (const a of assignments) {
+    const key = `${a.crew_id}__${a.month}`
+    totals[key] = (totals[key] || 0) + 1
+  }
+
+  let importedCount = 0
+  for (const [key, count] of Object.entries(totals)) {
+    const [crewId, month] = key.split('__')
+    if (mode === 'replace') {
+      await DB.prepare(
+        `INSERT INTO workload_history (crew_id, month, assignment_count) VALUES (?, ?, ?)
+         ON CONFLICT(crew_id, month) DO UPDATE SET assignment_count = excluded.assignment_count`
+      ).bind(parseInt(crewId), month, count).run()
+    } else {
+      await DB.prepare(
+        `INSERT INTO workload_history (crew_id, month, assignment_count) VALUES (?, ?, ?)
+         ON CONFLICT(crew_id, month) DO UPDATE SET assignment_count = assignment_count + excluded.assignment_count`
+      ).bind(parseInt(crewId), month, count).run()
+    }
+    importedCount += count
+  }
+
+  return c.json({ success: true, imported_assignments: importedCount, unique_crew_months: Object.keys(totals).length })
+})
+
+app.post('/api/history/patterns', async (c) => {
+  // Mine FOH assignment patterns from submitted assignment data
+  const { assignments } = await c.req.json()
+  if (!assignments || !Array.isArray(assignments)) return c.json({ error: 'assignments required' }, 400)
+
+  const { DB } = c.env
+  const crewResult = await DB.prepare('SELECT id, name FROM crew').all()
+  const crewById: Record<number, string> = {}
+  for (const cr of crewResult.results as any[]) crewById[cr.id] = cr.name
+
+  // Count FOH assignments per (crew, vertical, venue)
+  const fohCounts: Record<string, { crew_id: number, vertical: string, venue: string, foh_count: number }> = {}
+  const totalCounts: Record<string, number> = {} // key: vertical__venue
+
+  for (const a of assignments) {
+    const comboKey = `${a.vertical}__${a.venue_normalized}`
+    totalCounts[comboKey] = (totalCounts[comboKey] || 0) + 1
+
+    if (a.role === 'FOH') {
+      const key = `${a.crew_id}__${a.vertical}__${a.venue_normalized}`
+      if (!fohCounts[key]) fohCounts[key] = { crew_id: a.crew_id, vertical: a.vertical, venue: a.venue_normalized, foh_count: 0 }
+      fohCounts[key].foh_count++
+    }
+  }
+
+  const patterns = Object.values(fohCounts).map(p => {
+    const comboKey = `${p.vertical}__${p.venue}`
+    const total = totalCounts[comboKey] || 1
+    return {
+      crew_id: p.crew_id,
+      crew_name: crewById[p.crew_id] || String(p.crew_id),
+      vertical: p.vertical,
+      venue: p.venue,
+      foh_count: p.foh_count,
+      total_events: total,
+      pct: Math.round((p.foh_count / total) * 100)
+    }
+  }).sort((a, b) => b.pct - a.pct || b.foh_count - a.foh_count)
+
+  return c.json(patterns)
+})
+
+app.get('/api/history/summary', async (c) => {
+  const { DB } = c.env
+  const rows = await DB.prepare(
+    `SELECT c.name, c.level, SUM(wh.assignment_count) as total
+     FROM workload_history wh JOIN crew c ON wh.crew_id = c.id
+     GROUP BY c.id ORDER BY total DESC`
+  ).all()
+  return c.json(rows.results)
+})
+
+// ============================================
 // MAIN PAGE
 // ============================================
 
@@ -1674,6 +2015,14 @@ app.get('/', (c) => {
       ::-webkit-scrollbar { width: 8px; height: 8px; }
       ::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 4px; }
       ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+      .admin-tab { color: #9ca3af; }
+      .admin-tab:hover { color: #f5f0e8; background: rgba(255,255,255,0.05); }
+      .admin-tab.active { color: #60a5fa; background: rgba(59,130,246,0.15); border-bottom: 2px solid #3b82f6; }
+      .admin-input { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #f5f0e8; padding: 6px 10px; width: 100%; }
+      .admin-input:focus { outline: none; border-color: rgba(96,165,250,0.5); }
+      .admin-ta { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #f5f0e8; padding: 8px 10px; width: 100%; font-family: monospace; font-size: 12px; resize: vertical; }
+      .admin-ta:focus { outline: none; border-color: rgba(96,165,250,0.5); }
+      .pref-badge { background: rgba(59,130,246,0.15); color: #60a5fa; padding: 2px 8px; border-radius: 6px; font-size: 11px; }
     </style>
 </head>
 <body class="text-cream">
@@ -1686,19 +2035,54 @@ app.get('/', (c) => {
             </h1>
             <p class="text-muted text-sm mt-1">Sound Crew bulk assignment</p>
           </div>
-          <div id="step-indicators" class="flex items-center gap-3">
-            <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium active" data-step="1">1</div>
-            <div class="w-8 h-0.5 bg-gray-700"></div>
-            <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-gray-700" data-step="2">2</div>
-            <div class="w-8 h-0.5 bg-gray-700"></div>
-            <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-gray-700" data-step="3">3</div>
-            <div class="w-8 h-0.5 bg-gray-700"></div>
-            <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-gray-700" data-step="4">4</div>
-            <div class="w-8 h-0.5 bg-gray-700"></div>
-            <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-gray-700" data-step="5">5</div>
+          <div class="flex items-center gap-4">
+            <div id="step-indicators" class="flex items-center gap-3">
+              <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium active" data-step="1">1</div>
+              <div class="w-8 h-0.5 bg-gray-700"></div>
+              <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-gray-700" data-step="2">2</div>
+              <div class="w-8 h-0.5 bg-gray-700"></div>
+              <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-gray-700" data-step="3">3</div>
+              <div class="w-8 h-0.5 bg-gray-700"></div>
+              <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-gray-700" data-step="4">4</div>
+              <div class="w-8 h-0.5 bg-gray-700"></div>
+              <div class="step-indicator w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium bg-gray-700" data-step="5">5</div>
+            </div>
+            <button id="admin-btn" onclick="openAdminPanel()" title="Admin Settings"
+              class="w-10 h-10 rounded-full flex items-center justify-center text-gray-400 hover:text-blue-400 hover:bg-white/10 transition-colors border border-white/10">
+              <i class="fas fa-cog text-sm"></i>
+            </button>
           </div>
         </div>
       </header>
+
+      <!-- Admin Panel Overlay -->
+      <div id="admin-panel" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
+        <div class="glass-card p-6 w-full max-w-4xl mx-4 slide-up" style="max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
+          <div class="flex justify-between items-center mb-4">
+            <div class="flex items-center gap-2">
+              <i class="fas fa-cog text-blue-400 text-lg"></i>
+              <h2 class="text-lg font-semibold">Admin Settings</h2>
+            </div>
+            <button onclick="closeAdminPanel()" class="text-gray-400 hover:text-white transition-colors">
+              <i class="fas fa-times text-xl"></i>
+            </button>
+          </div>
+          <!-- Admin Tabs -->
+          <div class="flex gap-1 mb-4 border-b border-white/10 pb-0">
+            <button class="admin-tab active px-4 py-2 text-sm font-medium rounded-t-lg transition-colors" data-tab="config" onclick="switchAdminTab('config')">
+              <i class="fas fa-sliders-h mr-2"></i>Config
+            </button>
+            <button class="admin-tab px-4 py-2 text-sm font-medium rounded-t-lg transition-colors" data-tab="history" onclick="switchAdminTab('history')">
+              <i class="fas fa-history mr-2"></i>History Import
+            </button>
+            <button class="admin-tab px-4 py-2 text-sm font-medium rounded-t-lg transition-colors" data-tab="preferences" onclick="switchAdminTab('preferences')">
+              <i class="fas fa-thumbtack mr-2"></i>Persistent Preferences
+            </button>
+          </div>
+          <!-- Tab Content -->
+          <div id="admin-content" style="overflow-y:auto;flex:1;padding-right:4px"></div>
+        </div>
+      </div>
       
       <main class="max-w-6xl mx-auto">
         <!-- Step 1: Availability -->
@@ -1764,13 +2148,26 @@ app.get('/', (c) => {
           
           <!-- FOH Preferences Section -->
           <div class="mt-6">
-            <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center justify-between mb-2">
               <h3 class="text-lg font-medium flex items-center gap-2"><i class="fas fa-star text-amber-400"></i>FOH Preferences</h3>
-              <button id="add-preference-btn" class="btn-secondary px-4 py-2 rounded-xl text-sm"><i class="fas fa-plus mr-2"></i>Add Preference</button>
             </div>
-            <p class="text-muted text-sm mb-4">Lock specific FOH assignments before running the engine. Matching is case-insensitive.</p>
-            
-            <!-- Preferences List -->
+
+            <!-- Persistent preferences (from DB) -->
+            <div id="persistent-prefs-summary" class="glass-card-light p-3 mb-3 text-xs text-muted">
+              <i class="fas fa-database mr-1 text-blue-400"></i><span id="persistent-prefs-count">Loading persistent preferences...</span>
+              <button onclick="openAdminPanel();switchAdminTab('preferences')" class="text-blue-400 hover:text-blue-300 ml-2">Manage →</button>
+            </div>
+
+            <!-- Session preferences (this batch only) -->
+            <div class="mb-2">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-sm font-medium text-amber-400"><i class="fas fa-clock mr-1"></i>This Batch Only</span>
+                <button id="add-preference-btn" class="btn-secondary px-3 py-1.5 rounded-lg text-xs"><i class="fas fa-plus mr-1"></i>Add Session Preference</button>
+              </div>
+              <p class="text-muted text-xs mb-2">One-off overrides for this batch (e.g. training assignments). Cleared when you start a new batch.</p>
+            </div>
+
+            <!-- Session Preferences List -->
             <div id="preferences-list" class="glass-card-light p-4 mb-4 hidden">
               <table class="w-full text-sm">
                 <thead>
@@ -1784,8 +2181,8 @@ app.get('/', (c) => {
                 <tbody id="preferences-tbody"></tbody>
               </table>
             </div>
-            
-            <!-- Add Preference Form (hidden by default) -->
+
+            <!-- Add Session Preference Form (hidden by default) -->
             <div id="preference-form" class="glass-card-light p-4 hidden">
               <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
                 <div class="relative">
@@ -2299,6 +2696,23 @@ app.get('/', (c) => {
         document.getElementById('preference-form').classList.add('hidden');
         document.getElementById('pref-event-suggestions').classList.add('hidden');
       }
+
+      async function loadPersistentPrefsCount() {
+        try {
+          const res = await fetch('/api/preferences');
+          const prefs = await res.json();
+          const active = prefs.filter(p => p.is_active);
+          const el = document.getElementById('persistent-prefs-count');
+          if (!el) return;
+          if (active.length === 0) {
+            el.textContent = 'No persistent preferences set.';
+          } else {
+            el.textContent = active.length + ' persistent preference' + (active.length !== 1 ? 's' : '') + ' active: ' +
+              active.slice(0, 3).map(p => '"' + p.event_name_contains + '" → ' + p.crew_name).join(', ') +
+              (active.length > 3 ? ' ...' : '');
+          }
+        } catch {}
+      }
       
       function handleEventInput(e) {
         const input = e.target.value.trim().toLowerCase();
@@ -2428,7 +2842,23 @@ app.get('/', (c) => {
         div.textContent = text;
         return div.innerHTML;
       }
-      
+
+      function showToast(message, type = 'success') {
+        let toast = document.getElementById('toast-msg');
+        if (!toast) {
+          toast = document.createElement('div');
+          toast.id = 'toast-msg';
+          toast.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:9999;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:500;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';
+          document.body.appendChild(toast);
+        }
+        toast.style.background = type === 'error' ? 'rgba(248,113,113,0.9)' : 'rgba(52,211,153,0.9)';
+        toast.style.color = '#0f1419';
+        toast.style.opacity = '1';
+        toast.textContent = message;
+        clearTimeout(toast._timeout);
+        toast._timeout = setTimeout(() => { toast.style.opacity = '0'; }, 3000);
+      }
+
       async function runAssignmentEngine() {
         // Show progress
         const btn = document.getElementById('step3-run');
@@ -3062,7 +3492,7 @@ app.get('/', (c) => {
         document.getElementById('step' + step).classList.remove('hidden');
         document.querySelector('.step-indicator[data-step="' + step + '"]').classList.add('active');
         currentStep = step;
-        if (step === 3) renderStageRequirements();
+        if (step === 3) { renderStageRequirements(); loadPersistentPrefsCount(); }
       }
       
       function formatMonth(date) { return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0'); }
@@ -3133,6 +3563,463 @@ app.get('/', (c) => {
       }
       
       init();
+
+      // ============================================
+      // ADMIN PANEL
+      // ============================================
+
+      let adminData = { config: [], preferences: [] };
+      let historyPreviewData = null; // holds parsed rows for commit
+
+      function openAdminPanel() {
+        document.getElementById('admin-panel').classList.remove('hidden');
+        document.getElementById('admin-panel').classList.add('flex');
+        switchAdminTab('config');
+      }
+
+      function closeAdminPanel() {
+        document.getElementById('admin-panel').classList.add('hidden');
+        document.getElementById('admin-panel').classList.remove('flex');
+      }
+
+      // Close on backdrop click
+      document.getElementById('admin-panel').addEventListener('click', function(e) {
+        if (e.target === this) closeAdminPanel();
+      });
+
+      function switchAdminTab(tab) {
+        document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
+        document.querySelector('.admin-tab[data-tab="' + tab + '"]').classList.add('active');
+        const content = document.getElementById('admin-content');
+        if (tab === 'config') renderAdminConfig();
+        else if (tab === 'history') renderAdminHistory();
+        else if (tab === 'preferences') renderAdminPreferences();
+      }
+
+      // --- CONFIG TAB ---
+      async function renderAdminConfig() {
+        const content = document.getElementById('admin-content');
+        content.innerHTML = '<p class="text-muted text-sm">Loading...</p>';
+        const res = await fetch('/api/config');
+        adminData.config = await res.json();
+        const crewRes = await fetch('/api/crew');
+        const allCrew = await crewRes.json();
+
+        const CONFIG_LABELS = {
+          workload_weight_monthly: 'Monthly Workload Weight',
+          workload_weight_seniority: 'Seniority Weight Multiplier',
+          workload_weight_historical: 'Historical Workload Weight',
+          workload_history_months: 'History Lookback (months)',
+          score_base: 'Base Score',
+          score_stage_nonurgent_bonus: 'Stage Non-Urgent Bonus',
+          score_oc_penalty: 'Outside Crew Penalty',
+          score_preferred_foh_penalty: 'Preferred FOH Stage Penalty',
+          venue_defaults: 'Venue Default Crew Count (JSON)',
+          venue_map: 'Venue Alias Map (JSON)',
+          team_vertical_map: 'Team → Vertical Map (JSON)',
+        };
+
+        let html = '<div class="space-y-3">';
+        html += '<h3 class="text-sm font-semibold text-blue-400 mb-2">Scoring Parameters</h3>';
+
+        for (const row of adminData.config) {
+          const label = CONFIG_LABELS[row.key] || row.key;
+          const isJson = row.config_type === 'json';
+          html += '<div class="glass-card-light p-3">';
+          html += '<div class="flex justify-between items-start gap-3">';
+          html += '<div class="flex-1 min-w-0">';
+          html += '<div class="text-sm font-medium mb-0.5">' + escapeHtml(label) + '</div>';
+          if (row.description) html += '<div class="text-xs text-muted mb-1">' + escapeHtml(row.description) + '</div>';
+          if (isJson) {
+            let pretty = row.value;
+            try { pretty = JSON.stringify(JSON.parse(row.value), null, 2); } catch {}
+            html += '<textarea class="admin-ta mt-1" rows="3" id="cfg-' + row.key + '" style="font-size:11px">' + escapeHtml(pretty) + '</textarea>';
+          } else {
+            html += '<input class="admin-input mt-1" type="' + (row.config_type === 'number' ? 'number' : 'text') + '" id="cfg-' + row.key + '" value="' + escapeHtml(row.value) + '">';
+          }
+          html += '</div>';
+          html += '<button onclick="saveConfig(\'' + row.key + '\',' + (isJson ? 'true' : 'false') + ')" class="btn-secondary px-3 py-1.5 rounded-lg text-xs whitespace-nowrap mt-5">Save</button>';
+          html += '</div></div>';
+        }
+
+        // Crew monthly caps section
+        const internalCrew = allCrew.filter(c => c.level !== 'Hired');
+        html += '<h3 class="text-sm font-semibold text-blue-400 mt-6 mb-2">Per-Crew Monthly Assignment Caps</h3>';
+        html += '<div class="glass-card-light p-3">';
+        html += '<p class="text-xs text-muted mb-3">Set a monthly assignment limit per crew member. Leave blank for no limit.</p>';
+        html += '<div class="grid grid-cols-2 gap-2">';
+        for (const c of internalCrew) {
+          html += '<div class="flex items-center gap-2">';
+          html += '<span class="text-sm flex-1">' + escapeHtml(c.name) + ' <span class="text-muted text-xs">(' + c.level + ')</span></span>';
+          const capVal = c.monthly_assignment_cap != null ? c.monthly_assignment_cap : '';
+          html += '<input type="number" class="admin-input" style="width:70px" id="cap-' + c.id + '" value="' + capVal + '" placeholder="∞">';
+          html += '<button onclick="saveCap(' + c.id + ')" class="btn-secondary px-2 py-1 rounded text-xs">Save</button>';
+          html += '</div>';
+        }
+        html += '</div></div>';
+        html += '</div>';
+        content.innerHTML = html;
+      }
+
+      async function saveConfig(key, isJson) {
+        const el = document.getElementById('cfg-' + key);
+        let value = el.value;
+        if (isJson) {
+          try { JSON.parse(value); } catch { showToast('Invalid JSON for ' + key, 'error'); return; }
+        }
+        const res = await fetch('/api/config/' + key, {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ value })
+        });
+        const data = await res.json();
+        if (data.success) showToast('Saved: ' + key, 'success');
+        else showToast(data.error || 'Save failed', 'error');
+      }
+
+      async function saveCap(crewId) {
+        const el = document.getElementById('cap-' + crewId);
+        const capVal = el.value === '' ? null : parseInt(el.value);
+        const res = await fetch('/api/crew/' + crewId + '/cap', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ cap: capVal })
+        });
+        const data = await res.json();
+        if (data.success) showToast('Cap saved', 'success');
+        else showToast(data.error || 'Failed', 'error');
+      }
+
+      // --- HISTORY IMPORT TAB ---
+      function renderAdminHistory() {
+        const content = document.getElementById('admin-content');
+        content.innerHTML = \`
+          <div class="space-y-4">
+            <div>
+              <h3 class="text-sm font-semibold text-blue-400 mb-1">Import Historical Assignments</h3>
+              <p class="text-xs text-muted mb-3">Upload past assignment CSVs (Date, Program, Venue, Team, Sound Requirements, Call Time, Crew) to seed the workload history. The Crew column should list crew names separated by commas.</p>
+            </div>
+            <div class="upload-zone p-6 text-center cursor-pointer" onclick="document.getElementById('hist-csv-input').click()">
+              <i class="fas fa-file-csv text-blue-400 text-2xl mb-2"></i>
+              <p class="text-sm text-muted">Click to select CSV file or drag & drop</p>
+              <input type="file" id="hist-csv-input" accept=".csv" class="hidden" onchange="previewHistoryCSV(event)">
+            </div>
+            <div id="hist-preview" class="hidden"></div>
+            <div id="hist-patterns" class="hidden"></div>
+            <div id="hist-summary" class="glass-card-light p-4 hidden">
+              <h4 class="text-sm font-semibold mb-2">Current Workload History</h4>
+              <div id="hist-summary-content"></div>
+            </div>
+            <button onclick="loadHistorySummary()" class="btn-secondary px-4 py-2 rounded-lg text-sm">
+              <i class="fas fa-chart-bar mr-2"></i>View Current Workload Summary
+            </button>
+          </div>
+        \`;
+        setupHistDrop();
+      }
+
+      function setupHistDrop() {
+        const zone = document.querySelector('#admin-content .upload-zone');
+        if (!zone) return;
+        zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+        zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+        zone.addEventListener('drop', e => {
+          e.preventDefault(); zone.classList.remove('dragover');
+          const file = e.dataTransfer.files[0];
+          if (file) processHistFile(file);
+        });
+      }
+
+      function previewHistoryCSV(e) {
+        const file = e.target.files[0];
+        if (file) processHistFile(file);
+      }
+
+      async function processHistFile(file) {
+        const text = await file.text();
+        const previewDiv = document.getElementById('hist-preview');
+        previewDiv.innerHTML = '<p class="text-muted text-sm">Parsing...</p>';
+        previewDiv.classList.remove('hidden');
+
+        const res = await fetch('/api/history/import/preview', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ csv_text: text })
+        });
+        const data = await res.json();
+        historyPreviewData = data;
+
+        let html = '<div class="glass-card-light p-4">';
+        html += '<div class="flex justify-between items-center mb-3">';
+        html += '<h4 class="text-sm font-semibold">Preview (' + data.matched_rows + '/' + data.total_csv_rows + ' rows matched)</h4>';
+        if (data.unmatched && data.unmatched.length > 0) {
+          html += '<span class="text-xs text-yellow-400"><i class="fas fa-exclamation-triangle mr-1"></i>' + data.unmatched.length + ' unmatched names</span>';
+        }
+        html += '</div>';
+
+        if (data.unmatched && data.unmatched.length > 0) {
+          html += '<div class="mb-3 p-2 rounded-lg bg-yellow-400/10 border border-yellow-400/20">';
+          html += '<p class="text-xs text-yellow-400 font-medium mb-1">Unmatched crew names (will be skipped):</p>';
+          html += '<p class="text-xs text-muted">' + data.unmatched.map(escapeHtml).join(', ') + '</p>';
+          html += '</div>';
+        }
+
+        html += '<div class="overflow-x-auto" style="max-height:300px;overflow-y:auto">';
+        html += '<table class="w-full text-xs"><thead><tr class="border-b border-white/10">';
+        html += '<th class="text-left py-2 text-muted">Date</th><th class="text-left py-2 text-muted">Event</th>';
+        html += '<th class="text-left py-2 text-muted">Crew (set FOH)</th></tr></thead><tbody>';
+
+        for (let i = 0; i < data.parsed_rows.length; i++) {
+          const row = data.parsed_rows[i];
+          html += '<tr class="border-t border-white/5">';
+          html += '<td class="py-1.5 pr-3 whitespace-nowrap">' + row.date + '</td>';
+          html += '<td class="py-1.5 pr-3 max-w-xs truncate" title="' + escapeHtml(row.event_name) + '">' + escapeHtml(row.event_name.substring(0,40)) + '</td>';
+          html += '<td class="py-1.5"><div class="flex flex-wrap gap-1">';
+          for (let j = 0; j < row.matched.length; j++) {
+            const m = row.matched[j];
+            const isFoh = m.role_guess === 'FOH';
+            html += '<button onclick="toggleHistFoh(' + i + ',' + j + ')" id="hcrew-' + i + '-' + j + '" class="px-2 py-0.5 rounded text-xs border ' +
+              (isFoh ? 'border-blue-400 text-blue-400 bg-blue-400/15' : 'border-white/20 text-muted') + '">' +
+              escapeHtml(m.name) + (isFoh ? ' (FOH)' : '') + '</button>';
+          }
+          html += '</div></td></tr>';
+        }
+        html += '</tbody></table></div>';
+
+        html += '<div class="flex items-center gap-4 mt-4">';
+        html += '<div class="flex items-center gap-2">';
+        html += '<span class="text-xs text-muted">Import mode:</span>';
+        html += '<select id="hist-mode" class="admin-input text-xs" style="width:auto">';
+        html += '<option value="replace">Replace (overwrite existing months)</option>';
+        html += '<option value="add">Add to existing</option>';
+        html += '</select></div>';
+        html += '<button onclick="commitHistoryImport()" class="btn-primary px-4 py-2 rounded-lg text-sm">Confirm Import</button>';
+        html += '<button onclick="document.getElementById(\'hist-preview\').classList.add(\'hidden\')" class="btn-secondary px-3 py-2 rounded-lg text-xs">Cancel</button>';
+        html += '</div></div>';
+
+        previewDiv.innerHTML = html;
+      }
+
+      function toggleHistFoh(rowIdx, crewIdx) {
+        if (!historyPreviewData) return;
+        const row = historyPreviewData.parsed_rows[rowIdx];
+        // Toggle: if clicked crew is FOH, make them Stage and find first non-FOH to promote
+        for (let j = 0; j < row.matched.length; j++) {
+          if (j === crewIdx) row.matched[j].role_guess = 'FOH';
+          else if (row.matched[j].role_guess === 'FOH') row.matched[j].role_guess = 'Stage';
+        }
+        // Re-render just the buttons
+        for (let j = 0; j < row.matched.length; j++) {
+          const el = document.getElementById('hcrew-' + rowIdx + '-' + j);
+          if (!el) continue;
+          const isFoh = row.matched[j].role_guess === 'FOH';
+          el.className = 'px-2 py-0.5 rounded text-xs border ' + (isFoh ? 'border-blue-400 text-blue-400 bg-blue-400/15' : 'border-white/20 text-muted');
+          el.textContent = row.matched[j].name + (isFoh ? ' (FOH)' : '');
+        }
+      }
+
+      async function commitHistoryImport() {
+        if (!historyPreviewData) return;
+        const mode = document.getElementById('hist-mode').value;
+        // Build flat assignments list with crew_id, month, role, vertical, venue_normalized
+        const assignments = [];
+        for (const row of historyPreviewData.parsed_rows) {
+          const month = row.date.substring(0, 7); // yyyy-mm
+          for (const m of row.matched) {
+            assignments.push({
+              crew_id: m.crew_id,
+              month,
+              role: m.role_guess,
+              vertical: row.vertical,
+              venue_normalized: row.venue_normalized
+            });
+          }
+        }
+        const res = await fetch('/api/history/import/commit', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ assignments, mode })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast('Imported ' + data.imported_assignments + ' assignments for ' + data.unique_crew_months + ' crew-months', 'success');
+          document.getElementById('hist-preview').classList.add('hidden');
+          // Run pattern analysis
+          runPatternAnalysis(assignments);
+          loadHistorySummary();
+        } else {
+          showToast('Import failed', 'error');
+        }
+      }
+
+      async function runPatternAnalysis(assignments) {
+        const res = await fetch('/api/history/patterns', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ assignments })
+        });
+        const patterns = await res.json();
+        const div = document.getElementById('hist-patterns');
+        if (!patterns.length) { div.classList.add('hidden'); return; }
+
+        let html = '<div class="glass-card-light p-4">';
+        html += '<h4 class="text-sm font-semibold mb-1">Assignment Patterns Detected</h4>';
+        html += '<p class="text-xs text-muted mb-3">Crew who were consistently assigned as FOH for specific Vertical / Venue combinations. Click "Add as Preference" to make these persistent.</p>';
+        html += '<div class="overflow-x-auto"><table class="w-full text-xs"><thead><tr class="border-b border-white/10">';
+        html += '<th class="text-left py-2 text-muted">Crew</th><th class="text-left py-2 text-muted">Vertical</th><th class="text-left py-2 text-muted">Venue</th>';
+        html += '<th class="text-right py-2 text-muted">FOH Count</th><th class="text-right py-2 text-muted">%</th><th class="py-2"></th></tr></thead><tbody>';
+        for (const p of patterns) {
+          const highlight = p.pct >= 50 ? 'text-green-400' : 'text-muted';
+          html += '<tr class="border-t border-white/5">';
+          html += '<td class="py-1.5 font-medium">' + escapeHtml(p.crew_name) + '</td>';
+          html += '<td class="py-1.5">' + escapeHtml(p.vertical) + '</td>';
+          html += '<td class="py-1.5">' + escapeHtml(p.venue) + '</td>';
+          html += '<td class="py-1.5 text-right">' + p.foh_count + '/' + p.total_events + '</td>';
+          html += '<td class="py-1.5 text-right ' + highlight + ' font-medium">' + p.pct + '%</td>';
+          if (p.pct >= 50) {
+            html += '<td class="py-1.5 pl-2"><button onclick="addPatternAsPreference(' + p.crew_id + ',\'' +
+              escapeHtml(p.vertical) + '\',\'' + escapeHtml(p.venue) + '\',\'' + escapeHtml(p.crew_name) + '\')" ' +
+              'class="btn-secondary px-2 py-0.5 rounded text-xs">+ Add Preference</button></td>';
+          } else {
+            html += '<td></td>';
+          }
+          html += '</tr>';
+        }
+        html += '</tbody></table></div></div>';
+        div.innerHTML = html;
+        div.classList.remove('hidden');
+      }
+
+      async function addPatternAsPreference(crewId, vertical, venue, crewName) {
+        // Create a preference with venue_filter for this pattern
+        // Use vertical as event_name_contains with match_mode contains to catch all events of that vertical
+        const res = await fetch('/api/preferences', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            event_name_contains: vertical,
+            crew_id: crewId,
+            venue_filter: venue,
+            match_mode: 'contains'
+          })
+        });
+        const data = await res.json();
+        if (data.success) showToast('Preference added: ' + crewName + ' for ' + vertical + ' @ ' + venue, 'success');
+        else showToast(data.error || 'Failed', 'error');
+      }
+
+      async function loadHistorySummary() {
+        const res = await fetch('/api/history/summary');
+        const rows = await res.json();
+        const div = document.getElementById('hist-summary');
+        const contentDiv = document.getElementById('hist-summary-content');
+        if (!rows.length) { div.classList.add('hidden'); return; }
+        let html = '<table class="w-full text-xs"><thead><tr class="border-b border-white/10">';
+        html += '<th class="text-left py-1 text-muted">Crew</th><th class="text-left py-1 text-muted">Level</th><th class="text-right py-1 text-muted">Total Assignments</th></tr></thead><tbody>';
+        for (const r of rows) {
+          html += '<tr class="border-t border-white/5"><td class="py-1">' + escapeHtml(r.name) + '</td><td class="py-1 text-muted">' + r.level + '</td><td class="py-1 text-right">' + r.total + '</td></tr>';
+        }
+        html += '</tbody></table>';
+        contentDiv.innerHTML = html;
+        div.classList.remove('hidden');
+      }
+
+      // --- PREFERENCES TAB ---
+      async function renderAdminPreferences() {
+        const content = document.getElementById('admin-content');
+        content.innerHTML = '<p class="text-muted text-sm">Loading...</p>';
+        const [prefsRes, crewRes] = await Promise.all([fetch('/api/preferences'), fetch('/api/crew')]);
+        adminData.preferences = await prefsRes.json();
+        const allCrew = await crewRes.json();
+        const internalCrew = allCrew.filter(c => c.level !== 'Hired');
+        const venues = ['', 'JBT', 'Tata', 'Experimental', 'Godrej Dance', 'Little Theatre', 'Others'];
+
+        let html = '<div class="space-y-4">';
+        html += '<div class="flex justify-between items-center">';
+        html += '<div><h3 class="text-sm font-semibold text-blue-400">Persistent FOH Preferences</h3>';
+        html += '<p class="text-xs text-muted mt-0.5">These preferences apply across all batches. The engine always checks these first.</p></div>';
+        html += '<button onclick="showAddPrefForm()" class="btn-secondary px-3 py-1.5 rounded-lg text-xs"><i class="fas fa-plus mr-1"></i>Add Preference</button>';
+        html += '</div>';
+
+        // Add form (hidden by default)
+        html += '<div id="add-pref-form" class="glass-card-light p-4 hidden">';
+        html += '<h4 class="text-sm font-semibold mb-3">New Persistent Preference</h4>';
+        html += '<div class="grid grid-cols-2 gap-3">';
+        html += '<div><label class="text-xs text-muted block mb-1">Event Name Pattern</label>';
+        html += '<input class="admin-input" id="new-pref-event" placeholder="e.g. Jazz Night"></div>';
+        html += '<div><label class="text-xs text-muted block mb-1">FOH Crew</label>';
+        html += '<select class="admin-input" id="new-pref-crew"><option value="">Select...</option>';
+        for (const c of internalCrew) html += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
+        html += '</select></div>';
+        html += '<div><label class="text-xs text-muted block mb-1">Match Mode</label>';
+        html += '<select class="admin-input" id="new-pref-mode"><option value="contains">Contains</option><option value="exact">Exact</option></select></div>';
+        html += '<div><label class="text-xs text-muted block mb-1">Venue Filter (optional)</label>';
+        html += '<select class="admin-input" id="new-pref-venue"><option value="">Any venue</option>';
+        for (const v of venues.slice(1)) html += '<option value="' + v + '">' + v + '</option>';
+        html += '</select></div>';
+        html += '</div>';
+        html += '<div class="flex gap-2 mt-3">';
+        html += '<button onclick="savePersistentPref()" class="btn-primary px-4 py-2 rounded-lg text-sm">Save</button>';
+        html += '<button onclick="document.getElementById(\'add-pref-form\').classList.add(\'hidden\')" class="btn-secondary px-3 py-2 rounded-lg text-sm">Cancel</button>';
+        html += '</div></div>';
+
+        // Preferences table
+        if (adminData.preferences.length === 0) {
+          html += '<p class="text-muted text-sm py-4 text-center">No persistent preferences yet. Add one above or import from history.</p>';
+        } else {
+          html += '<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="border-b border-white/10">';
+          html += '<th class="text-left py-2 text-muted font-normal">Event Pattern</th>';
+          html += '<th class="text-left py-2 text-muted font-normal">Crew</th>';
+          html += '<th class="text-left py-2 text-muted font-normal">Mode</th>';
+          html += '<th class="text-left py-2 text-muted font-normal">Venue</th>';
+          html += '<th class="text-center py-2 text-muted font-normal">Active</th>';
+          html += '<th class="py-2"></th></tr></thead><tbody>';
+          for (const p of adminData.preferences) {
+            html += '<tr class="border-t border-white/5">';
+            html += '<td class="py-2"><span class="text-blue-400">' + escapeHtml(p.event_name_contains) + '</span></td>';
+            html += '<td class="py-2 font-medium">' + escapeHtml(p.crew_name) + '</td>';
+            html += '<td class="py-2"><span class="pref-badge">' + p.match_mode + '</span></td>';
+            html += '<td class="py-2 text-muted">' + (p.venue_filter || 'Any') + '</td>';
+            html += '<td class="py-2 text-center"><input type="checkbox" ' + (p.is_active ? 'checked' : '') +
+              ' onchange="togglePrefActive(' + p.id + ',this.checked)" class="cursor-pointer"></td>';
+            html += '<td class="py-2"><button onclick="deletePref(' + p.id + ')" class="text-red-400 hover:text-red-300 text-xs"><i class="fas fa-trash-alt"></i></button></td>';
+            html += '</tr>';
+          }
+          html += '</tbody></table></div>';
+        }
+        html += '</div>';
+        content.innerHTML = html;
+      }
+
+      function showAddPrefForm() {
+        document.getElementById('add-pref-form').classList.remove('hidden');
+        document.getElementById('new-pref-event').focus();
+      }
+
+      async function savePersistentPref() {
+        const event_name_contains = document.getElementById('new-pref-event').value.trim();
+        const crew_id = parseInt(document.getElementById('new-pref-crew').value);
+        const match_mode = document.getElementById('new-pref-mode').value;
+        const venue_filter = document.getElementById('new-pref-venue').value || null;
+        if (!event_name_contains || !crew_id) { showToast('Event pattern and crew required', 'error'); return; }
+        const res = await fetch('/api/preferences', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ event_name_contains, crew_id, match_mode, venue_filter })
+        });
+        const data = await res.json();
+        if (data.success) { showToast('Preference saved', 'success'); renderAdminPreferences(); }
+        else showToast(data.error || 'Failed', 'error');
+      }
+
+      async function togglePrefActive(id, active) {
+        await fetch('/api/preferences/' + id, {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ is_active: active })
+        });
+        showToast(active ? 'Preference enabled' : 'Preference disabled', 'success');
+      }
+
+      async function deletePref(id) {
+        if (!confirm('Delete this preference?')) return;
+        await fetch('/api/preferences/' + id, { method: 'DELETE' });
+        showToast('Preference deleted', 'success');
+        renderAdminPreferences();
+      }
+
     </script>
 </body>
 </html>
