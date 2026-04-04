@@ -3600,54 +3600,224 @@ app.get('/', (c) => {
       async function renderAdminConfig() {
         const content = document.getElementById('admin-content');
         content.innerHTML = '<p class="text-muted text-sm">Loading...</p>';
-        const res = await fetch('/api/config');
-        adminData.config = await res.json();
-        const crewRes = await fetch('/api/crew');
+        const [cfgRes, crewRes] = await Promise.all([fetch('/api/config'), fetch('/api/crew')]);
+        adminData.config = await cfgRes.json();
         const allCrew = await crewRes.json();
 
-        const CONFIG_LABELS = {
-          workload_weight_monthly: 'Monthly Workload Weight',
-          workload_weight_seniority: 'Seniority Weight Multiplier',
-          workload_weight_historical: 'Historical Workload Weight',
-          workload_history_months: 'History Lookback (months)',
-          score_base: 'Base Score',
-          score_stage_nonurgent_bonus: 'Stage Non-Urgent Bonus',
-          score_oc_penalty: 'Outside Crew Penalty',
-          score_preferred_foh_penalty: 'Preferred FOH Stage Penalty',
-          venue_defaults: 'Venue Default Crew Count (JSON)',
-          venue_map: 'Venue Alias Map (JSON)',
-          team_vertical_map: 'Team → Vertical Map (JSON)',
-        };
+        // Build lookup map from DB rows
+        const cfgMap = {};
+        for (const r of adminData.config) cfgMap[r.key] = r.value;
 
-        let html = '<div class="space-y-3">';
-        html += '<h3 class="text-sm font-semibold text-blue-400 mb-2">Scoring Parameters</h3>';
+        // ── How scoring works info box ──────────────────────────────────────
+        let html = '<div class="space-y-4">';
+        html += '<div class="glass-card-light p-4 border border-blue-400/20">';
+        html += '<div class="flex items-start gap-3">';
+        html += '<i class="fas fa-info-circle text-blue-400 mt-0.5 flex-shrink-0"></i>';
+        html += '<div>';
+        html += '<p class="text-sm font-medium text-blue-300 mb-1">How the assignment engine works</p>';
+        html += '<p class="text-xs text-muted leading-relaxed">Every crew member is given a score for each event. The engine picks the person with the <strong class="text-white">highest score</strong>. Everyone starts equal, then points are <strong class="text-teal-400">added</strong> for seniority and <strong class="text-red-400">subtracted</strong> based on how many shows they already have this month. The settings below control how strongly each factor matters. The defaults work well — only change them if you notice a specific problem.</p>';
+        html += '</div></div></div>';
 
-        for (const row of adminData.config) {
-          const label = CONFIG_LABELS[row.key] || row.key;
-          const isJson = row.config_type === 'json';
-          html += '<div class="glass-card-light p-3">';
+        // ── Section 1: Workload Fairness ─────────────────────────────────────
+        const fairnessParams = [
+          {
+            key: 'workload_weight_monthly',
+            label: 'Monthly Fairness Weight',
+            hint: 'points deducted per show already this month',
+            guidance: 'Controls how hard the engine tries to spread shows evenly across the team each month. <strong>Higher = stronger push to avoid overloading anyone.</strong> Default 1000 works well. Try 1500–2000 if the same person keeps getting too many shows; try 500 if you want seniority to matter more than equal distribution.'
+          },
+          {
+            key: 'workload_weight_seniority',
+            label: 'Seniority Preference',
+            hint: 'Senior gets 3×, Mid 2×, Junior 1× this value as a bonus',
+            guidance: 'Gives more experienced crew a head-start in the scoring. At default 100: Senior starts +300 pts ahead of Junior. <strong>Set to 0 to ignore seniority and rely entirely on fair load distribution.</strong> Increase to give seniors an even stronger advantage.'
+          },
+          {
+            key: 'workload_weight_historical',
+            label: 'Past-Months Tiebreaker',
+            hint: 'points deducted per show in the last few months (tiebreaker only)',
+            guidance: 'A very small penalty based on how busy someone was in the last few months. Only matters when two crew members are otherwise completely equal in score. <strong>Safe to leave at 1.</strong>'
+          },
+          {
+            key: 'workload_history_months',
+            label: 'History Lookback (months)',
+            hint: 'how many past months to include in the tiebreaker',
+            guidance: 'How far back the tiebreaker looks. 3 months is standard. Increase to factor in a longer work history; set to 0 to ignore past months entirely.'
+          }
+        ];
+
+        html += '<div>';
+        html += '<h3 class="text-sm font-semibold text-blue-400 mb-1 flex items-center gap-2"><i class="fas fa-balance-scale text-xs"></i> Workload Fairness</h3>';
+        html += '<p class="text-xs text-muted mb-3">These settings control how the engine balances work across the team.</p>';
+        for (const p of fairnessParams) {
+          const val = cfgMap[p.key] || '';
+          html += '<div class="glass-card-light p-3 mb-2">';
           html += '<div class="flex justify-between items-start gap-3">';
           html += '<div class="flex-1 min-w-0">';
-          html += '<div class="text-sm font-medium mb-0.5">' + escapeHtml(label) + '</div>';
-          if (row.description) html += '<div class="text-xs text-muted mb-1">' + escapeHtml(row.description) + '</div>';
-          if (isJson) {
-            let pretty = row.value;
-            try { pretty = JSON.stringify(JSON.parse(row.value), null, 2); } catch {}
-            html += '<textarea class="admin-ta mt-1" rows="3" id="cfg-' + row.key + '" style="font-size:11px">' + escapeHtml(pretty) + '</textarea>';
-          } else {
-            html += '<input class="admin-input mt-1" type="' + (row.config_type === 'number' ? 'number' : 'text') + '" id="cfg-' + row.key + '" value="' + escapeHtml(row.value) + '">';
-          }
-          html += '</div>';
-          html += '<button onclick="saveConfig(&apos;' + row.key + '&apos;,' + (isJson ? 'true' : 'false') + ')" class="btn-secondary px-3 py-1.5 rounded-lg text-xs whitespace-nowrap mt-5">Save</button>';
+          html += '<div class="text-sm font-semibold mb-0.5">' + p.label + '</div>';
+          html += '<div class="text-xs text-muted mb-1 italic">' + p.hint + '</div>';
+          html += '<div class="text-xs text-gray-300 leading-relaxed mb-2">' + p.guidance + '</div>';
+          html += '<div class="flex items-center gap-2">';
+          html += '<input class="admin-input" type="number" min="0" id="cfg-' + p.key + '" value="' + escapeHtml(val) + '" style="width:100px">';
+          html += '<span class="text-xs text-muted">(current: <strong>' + escapeHtml(val) + '</strong>)</span>';
+          html += '</div></div>';
+          html += '<button onclick="saveConfig(&apos;' + p.key + '&apos;,false)" class="btn-secondary px-3 py-1.5 rounded-lg text-xs whitespace-nowrap">Save</button>';
           html += '</div></div>';
         }
+        html += '</div>';
 
-        // Crew monthly caps section
-        const internalCrew = allCrew.filter(c => c.level !== 'Hired');
-        html += '<h3 class="text-sm font-semibold text-blue-400 mt-6 mb-2">Per-Crew Monthly Assignment Caps</h3>';
+        // ── Section 2: Assignment Rules ──────────────────────────────────────
+        const ruleParams = [
+          {
+            key: 'score_base',
+            label: 'Starting Score',
+            hint: 'every crew member begins with this score before any adjustments',
+            guidance: 'The baseline all scores are calculated from. No reason to change this unless advised.'
+          },
+          {
+            key: 'score_stage_nonurgent_bonus',
+            label: 'Flexible Crew Bonus',
+            hint: 'bonus for crew who are happy to do any stage show',
+            guidance: 'Stage crew who are <strong>not</strong> marked "stage only if urgent" receive this bonus. Increase to more strongly prefer flexible crew for stage roles.'
+          },
+          {
+            key: 'score_oc_penalty',
+            label: 'Hired Crew Last-Resort Penalty',
+            hint: 'points deducted for outside / hired crew on stage',
+            guidance: 'Outside or hired crew lose this many points when considered for stage assignments, so they are used only when no permanent crew is available. <strong>Increase to use hired crew even less; decrease if you want them used more freely.</strong>'
+          },
+          {
+            key: 'score_preferred_foh_penalty',
+            label: 'FOH Double-Booking Prevention',
+            hint: 'penalty applied when a preferred-FOH crew member is considered for stage on the same day',
+            guidance: 'When someone is the designated FOH for an event, they are penalised heavily if the engine tries to also put them on stage that same day. Increase for stricter protection; decrease if you are OK with potential double-booking.'
+          }
+        ];
+
+        html += '<div>';
+        html += '<h3 class="text-sm font-semibold text-blue-400 mb-1 flex items-center gap-2"><i class="fas fa-sliders-h text-xs"></i> Assignment Rules</h3>';
+        html += '<p class="text-xs text-muted mb-3">Fine-tune how the engine handles special situations.</p>';
+        for (const p of ruleParams) {
+          const val = cfgMap[p.key] || '';
+          html += '<div class="glass-card-light p-3 mb-2">';
+          html += '<div class="flex justify-between items-start gap-3">';
+          html += '<div class="flex-1 min-w-0">';
+          html += '<div class="text-sm font-semibold mb-0.5">' + p.label + '</div>';
+          html += '<div class="text-xs text-muted mb-1 italic">' + p.hint + '</div>';
+          html += '<div class="text-xs text-gray-300 leading-relaxed mb-2">' + p.guidance + '</div>';
+          html += '<div class="flex items-center gap-2">';
+          html += '<input class="admin-input" type="number" min="0" id="cfg-' + p.key + '" value="' + escapeHtml(val) + '" style="width:100px">';
+          html += '<span class="text-xs text-muted">(current: <strong>' + escapeHtml(val) + '</strong>)</span>';
+          html += '</div></div>';
+          html += '<button onclick="saveConfig(&apos;' + p.key + '&apos;,false)" class="btn-secondary px-3 py-1.5 rounded-lg text-xs whitespace-nowrap">Save</button>';
+          html += '</div></div>';
+        }
+        html += '</div>';
+
+        // ── Section 3: Venue Defaults (visual table) ─────────────────────────
+        const CANONICAL_VENUES = ['JBT', 'Tata', 'Experimental', 'Godrej Dance', 'Little Theatre', 'Others'];
+        let vdObj = {};
+        try { vdObj = JSON.parse(cfgMap['venue_defaults'] || '{}'); } catch {}
+
+        html += '<div>';
+        html += '<h3 class="text-sm font-semibold text-blue-400 mb-1 flex items-center gap-2"><i class="fas fa-theater-masks text-xs"></i> Default Crew Required per Venue</h3>';
+        html += '<p class="text-xs text-muted mb-1">How many people (FOH + stage combined) does each venue typically need?</p>';
+        html += '<p class="text-xs text-muted mb-3">This is the default — you can override it per event in Step 3 when uploading shows.</p>';
         html += '<div class="glass-card-light p-3">';
-        html += '<p class="text-xs text-muted mb-3">Set a monthly assignment limit per crew member. Leave blank for no limit.</p>';
-        html += '<div class="grid grid-cols-2 gap-2">';
+        html += '<table class="w-full text-sm"><thead><tr>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">Venue</th>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">Total crew needed</th>';
+        html += '</tr></thead><tbody>';
+        for (const v of CANONICAL_VENUES) {
+          const vId = v.replace(/ /g, '_');
+          const cur = vdObj[v] != null ? vdObj[v] : 1;
+          html += '<tr class="border-t border-white/5">';
+          html += '<td class="py-2 pr-4 font-medium">' + v + '</td>';
+          html += '<td class="py-1.5"><div class="flex items-center gap-2">';
+          html += '<input type="number" min="1" max="10" class="admin-input" style="width:70px" id="vd-' + vId + '" value="' + cur + '">';
+          html += '<span class="text-xs text-muted">people</span>';
+          html += '</div></td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        html += '<div class="mt-3 pt-3 border-t border-white/10">';
+        html += '<button onclick="saveVenueDefaults()" class="btn-primary px-4 py-2 rounded-lg text-sm"><i class="fas fa-save mr-2"></i>Save Crew Counts</button>';
+        html += '</div></div></div>';
+
+        // ── Section 4: Venue Aliases (editable table) ────────────────────────
+        let vmObj = {};
+        try { vmObj = JSON.parse(cfgMap['venue_map'] || '{}'); } catch {}
+        const vmEntries = Object.entries(vmObj);
+
+        const canonOpts = CANONICAL_VENUES.map(v => '<option value="' + v + '">' + v + '</option>').join('');
+
+        html += '<div>';
+        html += '<h3 class="text-sm font-semibold text-blue-400 mb-1 flex items-center gap-2"><i class="fas fa-map text-xs"></i> Venue Name Aliases</h3>';
+        html += '<p class="text-xs text-muted mb-1">When your CSV file uses a shorthand or abbreviation for a venue, tell the system what it really means.</p>';
+        html += '<p class="text-xs text-muted mb-3">Example: your CSV says <strong class="text-white">TT</strong> but the system should treat it as <strong class="text-white">Tata</strong>.</p>';
+        html += '<div class="glass-card-light p-3">';
+        html += '<table class="w-full text-sm" id="venue-map-table"><thead><tr>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">When your CSV contains...</th>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs w-40">Treat as venue:</th>';
+        html += '<th class="w-8"></th>';
+        html += '</tr></thead>';
+        html += '<tbody id="venue-map-tbody">';
+        for (const [alias, canon] of vmEntries) {
+          html += '<tr class="border-t border-white/5">';
+          html += '<td class="py-1 pr-2"><input class="admin-input vm-alias" value="' + escapeHtml(alias) + '" placeholder="e.g. My Venue Name"></td>';
+          html += '<td class="py-1 pr-2"><select class="admin-input vm-canon">' + canonOpts + '</select></td>';
+          html += '<td class="py-1"><button onclick="this.closest(&apos;tr&apos;).remove()" class="text-red-400 hover:text-red-300 text-xs px-1" title="Remove">✕</button></td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        html += '<div class="mt-3 pt-3 border-t border-white/10 flex gap-2 flex-wrap">';
+        html += '<button onclick="addVenueMapRow()" class="btn-secondary px-3 py-1.5 rounded-lg text-xs"><i class="fas fa-plus mr-1"></i>Add Alias</button>';
+        html += '<button onclick="saveVenueMap()" class="btn-primary px-4 py-1.5 rounded-lg text-xs"><i class="fas fa-save mr-1"></i>Save All Aliases</button>';
+        html += '</div></div></div>';
+
+        // Need to set selected values after innerHTML is set, so store them
+        // We'll do it via a script approach: encode the vm data in data attributes
+        // Actually, the select values need to be set post-render. We'll do it in a follow-up step.
+        // Store canon values in data-canon attribute and set after render.
+
+        // ── Section 5: Team → Vertical Map ──────────────────────────────────
+        let tvObj = {};
+        try { tvObj = JSON.parse(cfgMap['team_vertical_map'] || '{}'); } catch {}
+        const tvEntries = Object.entries(tvObj);
+
+        const VERTICALS = ['Dance', 'Indian Music', 'Intl Music', 'Theatre', 'Library', 'Western Music', 'Corporate', 'Others'];
+        const vertOpts = VERTICALS.map(v => '<option value="' + v + '">' + v + '</option>').join('');
+
+        html += '<div>';
+        html += '<h3 class="text-sm font-semibold text-blue-400 mb-1 flex items-center gap-2"><i class="fas fa-sitemap text-xs"></i> Team → Vertical Mapping</h3>';
+        html += '<p class="text-xs text-muted mb-1">Maps the <strong class="text-white">Team</strong> column in your CSV to the correct programme type (vertical).</p>';
+        html += '<p class="text-xs text-muted mb-3">The vertical determines which crew are eligible to work a show (based on their capability matrix). If a team name is missing here, it will be treated as "Others".</p>';
+        html += '<div class="glass-card-light p-3">';
+        html += '<table class="w-full text-sm" id="team-map-table"><thead><tr>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">When CSV &quot;Team&quot; column contains...</th>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs w-44">Vertical is:</th>';
+        html += '<th class="w-8"></th>';
+        html += '</tr></thead>';
+        html += '<tbody id="team-map-tbody">';
+        for (const [team, vert] of tvEntries) {
+          html += '<tr class="border-t border-white/5">';
+          html += '<td class="py-1 pr-2"><input class="admin-input tv-team" value="' + escapeHtml(team) + '" placeholder="e.g. Dr.Swapno/Team"></td>';
+          html += '<td class="py-1 pr-2"><select class="admin-input tv-vert">' + vertOpts + '</select></td>';
+          html += '<td class="py-1"><button onclick="this.closest(&apos;tr&apos;).remove()" class="text-red-400 hover:text-red-300 text-xs px-1" title="Remove">✕</button></td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        html += '<div class="mt-3 pt-3 border-t border-white/10 flex gap-2 flex-wrap">';
+        html += '<button onclick="addTeamMapRow()" class="btn-secondary px-3 py-1.5 rounded-lg text-xs"><i class="fas fa-plus mr-1"></i>Add Mapping</button>';
+        html += '<button onclick="saveTeamMap()" class="btn-primary px-4 py-1.5 rounded-lg text-xs"><i class="fas fa-save mr-1"></i>Save All Mappings</button>';
+        html += '</div></div></div>';
+
+        // ── Section 6: Per-crew monthly caps ─────────────────────────────────
+        const internalCrew = allCrew.filter(c => c.level !== 'Hired');
+        html += '<div>';
+        html += '<h3 class="text-sm font-semibold text-blue-400 mb-1 flex items-center gap-2"><i class="fas fa-user-clock text-xs"></i> Monthly Assignment Caps</h3>';
+        html += '<p class="text-xs text-muted mb-3">Limit how many shows a crew member can be assigned in a single month. Leave blank for no limit.</p>';
+        html += '<div class="glass-card-light p-3"><div class="grid grid-cols-2 gap-2">';
         for (const c of internalCrew) {
           html += '<div class="flex items-center gap-2">';
           html += '<span class="text-sm flex-1">' + escapeHtml(c.name) + ' <span class="text-muted text-xs">(' + c.level + ')</span></span>';
@@ -3656,9 +3826,18 @@ app.get('/', (c) => {
           html += '<button onclick="saveCap(' + c.id + ')" class="btn-secondary px-2 py-1 rounded text-xs">Save</button>';
           html += '</div>';
         }
-        html += '</div></div>';
+        html += '</div></div></div>';
+
         html += '</div>';
         content.innerHTML = html;
+
+        // Set select values post-render (innerHTML doesn't preserve .value)
+        document.querySelectorAll('#venue-map-tbody tr').forEach((tr, i) => {
+          if (vmEntries[i]) tr.querySelector('.vm-canon').value = vmEntries[i][1];
+        });
+        document.querySelectorAll('#team-map-tbody tr').forEach((tr, i) => {
+          if (tvEntries[i]) tr.querySelector('.tv-vert').value = tvEntries[i][1];
+        });
       }
 
       async function saveConfig(key, isJson) {
@@ -3672,8 +3851,81 @@ app.get('/', (c) => {
           body: JSON.stringify({ value })
         });
         const data = await res.json();
-        if (data.success) showToast('Saved: ' + key, 'success');
+        if (data.success) showToast('Saved', 'success');
         else showToast(data.error || 'Save failed', 'error');
+      }
+
+      async function saveVenueDefaults() {
+        const venues = ['JBT', 'Tata', 'Experimental', 'Godrej Dance', 'Little Theatre', 'Others'];
+        const obj = {};
+        for (const v of venues) {
+          const el = document.getElementById('vd-' + v.replace(/ /g, '_'));
+          obj[v] = parseInt(el ? el.value : '1') || 1;
+        }
+        const res = await fetch('/api/config/venue_defaults', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ value: JSON.stringify(obj) })
+        });
+        const data = await res.json();
+        showToast(data.success ? 'Crew counts saved' : (data.error || 'Failed'), data.success ? 'success' : 'error');
+      }
+
+      async function saveVenueMap() {
+        const rows = document.querySelectorAll('#venue-map-tbody tr');
+        const obj = {};
+        rows.forEach(tr => {
+          const alias = tr.querySelector('.vm-alias').value.trim();
+          const canon = tr.querySelector('.vm-canon').value;
+          if (alias) obj[alias] = canon;
+        });
+        const res = await fetch('/api/config/venue_map', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ value: JSON.stringify(obj) })
+        });
+        const data = await res.json();
+        showToast(data.success ? 'Venue aliases saved' : (data.error || 'Failed'), data.success ? 'success' : 'error');
+      }
+
+      function addVenueMapRow() {
+        const tbody = document.getElementById('venue-map-tbody');
+        const venues = ['JBT', 'Tata', 'Experimental', 'Godrej Dance', 'Little Theatre', 'Others'];
+        const opts = venues.map(v => '<option value="' + v + '">' + v + '</option>').join('');
+        const tr = document.createElement('tr');
+        tr.className = 'border-t border-white/5';
+        tr.innerHTML = '<td class="py-1 pr-2"><input class="admin-input vm-alias" placeholder="Type what your CSV says..."></td>' +
+          '<td class="py-1 pr-2"><select class="admin-input vm-canon">' + opts + '</select></td>' +
+          '<td class="py-1"><button onclick="this.closest(&apos;tr&apos;).remove()" class="text-red-400 hover:text-red-300 text-xs px-1">✕</button></td>';
+        tbody.appendChild(tr);
+        tr.querySelector('.vm-alias').focus();
+      }
+
+      async function saveTeamMap() {
+        const rows = document.querySelectorAll('#team-map-tbody tr');
+        const obj = {};
+        rows.forEach(tr => {
+          const team = tr.querySelector('.tv-team').value.trim();
+          const vert = tr.querySelector('.tv-vert').value;
+          if (team !== undefined) obj[team] = vert; // allow empty string key
+        });
+        const res = await fetch('/api/config/team_vertical_map', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ value: JSON.stringify(obj) })
+        });
+        const data = await res.json();
+        showToast(data.success ? 'Team mappings saved' : (data.error || 'Failed'), data.success ? 'success' : 'error');
+      }
+
+      function addTeamMapRow() {
+        const tbody = document.getElementById('team-map-tbody');
+        const verts = ['Dance', 'Indian Music', 'Intl Music', 'Theatre', 'Library', 'Western Music', 'Corporate', 'Others'];
+        const opts = verts.map(v => '<option value="' + v + '">' + v + '</option>').join('');
+        const tr = document.createElement('tr');
+        tr.className = 'border-t border-white/5';
+        tr.innerHTML = '<td class="py-1 pr-2"><input class="admin-input tv-team" placeholder="e.g. Dr.Swapno/Team"></td>' +
+          '<td class="py-1 pr-2"><select class="admin-input tv-vert">' + opts + '</select></td>' +
+          '<td class="py-1"><button onclick="this.closest(&apos;tr&apos;).remove()" class="text-red-400 hover:text-red-300 text-xs px-1">✕</button></td>';
+        tbody.appendChild(tr);
+        tr.querySelector('.tv-team').focus();
       }
 
       async function saveCap(crewId) {
