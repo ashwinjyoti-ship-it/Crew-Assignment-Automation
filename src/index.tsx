@@ -3638,7 +3638,7 @@ app.get('/', (c) => {
             html += '<input class="admin-input mt-1" type="' + (row.config_type === 'number' ? 'number' : 'text') + '" id="cfg-' + row.key + '" value="' + escapeHtml(row.value) + '">';
           }
           html += '</div>';
-          html += '<button onclick="saveConfig(\'' + row.key + '\',' + (isJson ? 'true' : 'false') + ')" class="btn-secondary px-3 py-1.5 rounded-lg text-xs whitespace-nowrap mt-5">Save</button>';
+          html += '<button onclick="saveConfig(&apos;' + row.key + '&apos;,' + (isJson ? 'true' : 'false') + ')" class="btn-secondary px-3 py-1.5 rounded-lg text-xs whitespace-nowrap mt-5">Save</button>';
           html += '</div></div>';
         }
 
@@ -3694,7 +3694,7 @@ app.get('/', (c) => {
         let html = '<div class="space-y-4">';
         html += '<div><h3 class="text-sm font-semibold text-blue-400 mb-1">Import Historical Assignments</h3>';
         html += '<p class="text-xs text-muted mb-3">Upload past assignment CSVs (Date, Program, Venue, Team, Sound Requirements, Call Time, Crew) to seed the workload history. The Crew column should list crew names separated by commas.</p></div>';
-        html += '<div class="upload-zone p-6 text-center cursor-pointer" onclick="document.getElementById(\'hist-csv-input\').click()">';
+        html += '<div class="upload-zone p-6 text-center cursor-pointer" onclick="document.getElementById(&apos;hist-csv-input&apos;).click()">';
         html += '<i class="fas fa-file-csv text-blue-400 text-2xl mb-2"></i>';
         html += '<p class="text-sm text-muted">Click to select CSV file or drag &amp; drop</p>';
         html += '<input type="file" id="hist-csv-input" accept=".csv" class="hidden" onchange="previewHistoryCSV(event)"></div>';
@@ -3785,7 +3785,7 @@ app.get('/', (c) => {
         html += '<option value="add">Add to existing</option>';
         html += '</select></div>';
         html += '<button onclick="commitHistoryImport()" class="btn-primary px-4 py-2 rounded-lg text-sm">Confirm Import</button>';
-        html += '<button onclick="document.getElementById(\'hist-preview\').classList.add(\'hidden\')" class="btn-secondary px-3 py-2 rounded-lg text-xs">Cancel</button>';
+        html += '<button onclick="document.getElementById(&apos;hist-preview&apos;).classList.add(&apos;hidden&apos;)" class="btn-secondary px-3 py-2 rounded-lg text-xs">Cancel</button>';
         html += '</div></div>';
 
         previewDiv.innerHTML = html;
@@ -3866,8 +3866,8 @@ app.get('/', (c) => {
           html += '<td class="py-1.5 text-right">' + p.foh_count + '/' + p.total_events + '</td>';
           html += '<td class="py-1.5 text-right ' + highlight + ' font-medium">' + p.pct + '%</td>';
           if (p.pct >= 50) {
-            html += '<td class="py-1.5 pl-2"><button onclick="addPatternAsPreference(' + p.crew_id + ',\'' +
-              escapeHtml(p.vertical) + '\',\'' + escapeHtml(p.venue) + '\',\'' + escapeHtml(p.crew_name) + '\')" ' +
+            html += '<td class="py-1.5 pl-2"><button onclick="addPatternAsPreference(' + p.crew_id + ',&apos;' +
+              escapeHtml(p.vertical) + '&apos;,&apos;' + escapeHtml(p.venue) + '&apos;,&apos;' + escapeHtml(p.crew_name) + '&apos;)" ' +
               'class="btn-secondary px-2 py-0.5 rounded text-xs">+ Add Preference</button></td>';
           } else {
             html += '<td></td>';
@@ -3948,7 +3948,7 @@ app.get('/', (c) => {
         html += '</div>';
         html += '<div class="flex gap-2 mt-3">';
         html += '<button onclick="savePersistentPref()" class="btn-primary px-4 py-2 rounded-lg text-sm">Save</button>';
-        html += '<button onclick="document.getElementById(\'add-pref-form\').classList.add(\'hidden\')" class="btn-secondary px-3 py-2 rounded-lg text-sm">Cancel</button>';
+        html += '<button onclick="document.getElementById(&apos;add-pref-form&apos;).classList.add(&apos;hidden&apos;)" class="btn-secondary px-3 py-2 rounded-lg text-sm">Cancel</button>';
         html += '</div></div>';
 
         // Preferences table
