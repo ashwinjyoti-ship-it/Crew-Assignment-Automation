@@ -3691,28 +3691,22 @@ app.get('/', (c) => {
       // --- HISTORY IMPORT TAB ---
       function renderAdminHistory() {
         const content = document.getElementById('admin-content');
-        content.innerHTML = \`
-          <div class="space-y-4">
-            <div>
-              <h3 class="text-sm font-semibold text-blue-400 mb-1">Import Historical Assignments</h3>
-              <p class="text-xs text-muted mb-3">Upload past assignment CSVs (Date, Program, Venue, Team, Sound Requirements, Call Time, Crew) to seed the workload history. The Crew column should list crew names separated by commas.</p>
-            </div>
-            <div class="upload-zone p-6 text-center cursor-pointer" onclick="document.getElementById('hist-csv-input').click()">
-              <i class="fas fa-file-csv text-blue-400 text-2xl mb-2"></i>
-              <p class="text-sm text-muted">Click to select CSV file or drag & drop</p>
-              <input type="file" id="hist-csv-input" accept=".csv" class="hidden" onchange="previewHistoryCSV(event)">
-            </div>
-            <div id="hist-preview" class="hidden"></div>
-            <div id="hist-patterns" class="hidden"></div>
-            <div id="hist-summary" class="glass-card-light p-4 hidden">
-              <h4 class="text-sm font-semibold mb-2">Current Workload History</h4>
-              <div id="hist-summary-content"></div>
-            </div>
-            <button onclick="loadHistorySummary()" class="btn-secondary px-4 py-2 rounded-lg text-sm">
-              <i class="fas fa-chart-bar mr-2"></i>View Current Workload Summary
-            </button>
-          </div>
-        \`;
+        let html = '<div class="space-y-4">';
+        html += '<div><h3 class="text-sm font-semibold text-blue-400 mb-1">Import Historical Assignments</h3>';
+        html += '<p class="text-xs text-muted mb-3">Upload past assignment CSVs (Date, Program, Venue, Team, Sound Requirements, Call Time, Crew) to seed the workload history. The Crew column should list crew names separated by commas.</p></div>';
+        html += '<div class="upload-zone p-6 text-center cursor-pointer" onclick="document.getElementById(\'hist-csv-input\').click()">';
+        html += '<i class="fas fa-file-csv text-blue-400 text-2xl mb-2"></i>';
+        html += '<p class="text-sm text-muted">Click to select CSV file or drag &amp; drop</p>';
+        html += '<input type="file" id="hist-csv-input" accept=".csv" class="hidden" onchange="previewHistoryCSV(event)"></div>';
+        html += '<div id="hist-preview" class="hidden"></div>';
+        html += '<div id="hist-patterns" class="hidden"></div>';
+        html += '<div id="hist-summary" class="glass-card-light p-4 hidden">';
+        html += '<h4 class="text-sm font-semibold mb-2">Current Workload History</h4>';
+        html += '<div id="hist-summary-content"></div></div>';
+        html += '<button onclick="loadHistorySummary()" class="btn-secondary px-4 py-2 rounded-lg text-sm">';
+        html += '<i class="fas fa-chart-bar mr-2"></i>View Current Workload Summary</button>';
+        html += '</div>';
+        content.innerHTML = html;
         setupHistDrop();
       }
 
