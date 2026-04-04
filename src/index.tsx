@@ -3615,7 +3615,8 @@ app.get('/', (c) => {
         html += '<i class="fas fa-info-circle text-blue-400 mt-0.5 flex-shrink-0"></i>';
         html += '<div>';
         html += '<p class="text-sm font-medium text-blue-300 mb-1">How the assignment engine works</p>';
-        html += '<p class="text-xs text-muted leading-relaxed">Every crew member is given a score for each event. The engine picks the person with the <strong class="text-white">highest score</strong>. Everyone starts equal, then points are <strong class="text-teal-400">added</strong> for seniority and <strong class="text-red-400">subtracted</strong> based on how many shows they already have this month. The settings below control how strongly each factor matters. The defaults work well — only change them if you notice a specific problem.</p>';
+        html += '<p class="text-xs text-muted leading-relaxed mb-2">Every crew member is given a score for each event. The engine picks the person with the <strong class="text-white">highest score</strong>. Everyone starts equal, then points are <strong class="text-teal-400">added</strong> for seniority and <strong class="text-red-400">subtracted</strong> based on how many shows they already have this month.</p>';
+        html += '<p class="text-xs leading-relaxed"><span class="text-amber-400 font-medium">When to change things:</span> <span class="text-muted">The scoring numbers are set-and-forget — only touch them if you see a repeated problem (e.g. the same person always gets overloaded). The two tables you will update regularly are <strong class="text-white">Venue Aliases</strong> and <strong class="text-white">Team Mappings</strong> — add a new row whenever a venue or team name in your CSV is not being recognised.</span></p>';
         html += '</div></div></div>';
 
         // ── Section 1: Workload Fairness ─────────────────────────────────────
