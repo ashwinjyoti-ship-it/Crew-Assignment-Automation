@@ -279,6 +279,51 @@ app.get('/api/crew', async (c) => {
   })))
 })
 
+app.post('/api/crew', async (c) => {
+  const { DB } = c.env
+  const { name, level, can_stage, stage_only_if_urgent, is_outside_crew,
+          venue_capabilities, vertical_capabilities, special_notes } = await c.req.json()
+  if (!name || !level) return c.json({ error: 'name and level required' }, 400)
+  const validLevels = ['Senior', 'Mid', 'Junior', 'Hired']
+  if (!validLevels.includes(level)) return c.json({ error: 'invalid level' }, 400)
+  try {
+    const result = await DB.prepare(
+      'INSERT INTO crew (name, level, can_stage, stage_only_if_urgent, is_outside_crew, venue_capabilities, vertical_capabilities, special_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).bind(name, level, can_stage ? 1 : 0, stage_only_if_urgent ? 1 : 0, is_outside_crew ? 1 : 0,
+           JSON.stringify(venue_capabilities || {}), JSON.stringify(vertical_capabilities || {}),
+           special_notes || null).run()
+    return c.json({ success: true, id: result.meta.last_row_id })
+  } catch (e: any) {
+    if (e.message?.includes('UNIQUE')) return c.json({ error: 'A crew member with that name already exists' }, 409)
+    return c.json({ error: 'Failed to create crew member' }, 500)
+  }
+})
+
+app.put('/api/crew/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'))
+  const { name, level, can_stage, stage_only_if_urgent, is_outside_crew,
+          venue_capabilities, vertical_capabilities, special_notes, monthly_assignment_cap } = await c.req.json()
+  await DB.prepare(
+    'UPDATE crew SET name=?, level=?, can_stage=?, stage_only_if_urgent=?, is_outside_crew=?, venue_capabilities=?, vertical_capabilities=?, special_notes=?, monthly_assignment_cap=? WHERE id=?'
+  ).bind(name, level, can_stage ? 1 : 0, stage_only_if_urgent ? 1 : 0, is_outside_crew ? 1 : 0,
+         JSON.stringify(venue_capabilities || {}), JSON.stringify(vertical_capabilities || {}),
+         special_notes || null,
+         (monthly_assignment_cap != null && monthly_assignment_cap !== '') ? parseInt(monthly_assignment_cap) : null,
+         id).run()
+  return c.json({ success: true })
+})
+
+app.delete('/api/crew/:id', async (c) => {
+  const { DB } = c.env
+  const id = parseInt(c.req.param('id'))
+  await DB.prepare('DELETE FROM crew_unavailability WHERE crew_id=?').bind(id).run()
+  await DB.prepare('DELETE FROM workload_history WHERE crew_id=?').bind(id).run()
+  await DB.prepare('DELETE FROM foh_preferences WHERE crew_id=?').bind(id).run()
+  await DB.prepare('DELETE FROM crew WHERE id=?').bind(id).run()
+  return c.json({ success: true })
+})
+
 // ============================================
 // UNAVAILABILITY API
 // ============================================
@@ -2078,6 +2123,9 @@ app.get('/', (c) => {
             <button class="admin-tab px-4 py-2 text-sm font-medium rounded-t-lg transition-colors" data-tab="preferences" onclick="switchAdminTab('preferences')">
               <i class="fas fa-thumbtack mr-2"></i>Persistent Preferences
             </button>
+            <button class="admin-tab px-4 py-2 text-sm font-medium rounded-t-lg transition-colors" data-tab="crew" onclick="switchAdminTab('crew')">
+              <i class="fas fa-users mr-2"></i>Crew
+            </button>
           </div>
           <!-- Tab Content -->
           <div id="admin-content" style="overflow-y:auto;flex:1;padding-right:4px"></div>
@@ -3594,15 +3642,15 @@ app.get('/', (c) => {
         if (tab === 'config') renderAdminConfig();
         else if (tab === 'history') renderAdminHistory();
         else if (tab === 'preferences') renderAdminPreferences();
+        else if (tab === 'crew') renderAdminCrew();
       }
 
       // --- CONFIG TAB ---
       async function renderAdminConfig() {
         const content = document.getElementById('admin-content');
         content.innerHTML = '<p class="text-muted text-sm">Loading...</p>';
-        const [cfgRes, crewRes] = await Promise.all([fetch('/api/config'), fetch('/api/crew')]);
+        const cfgRes = await fetch('/api/config');
         adminData.config = await cfgRes.json();
-        const allCrew = await crewRes.json();
 
         // Build lookup map from DB rows
         const cfgMap = {};
@@ -3813,21 +3861,11 @@ app.get('/', (c) => {
         html += '<button onclick="saveTeamMap()" class="btn-primary px-4 py-1.5 rounded-lg text-xs"><i class="fas fa-save mr-1"></i>Save All Mappings</button>';
         html += '</div></div></div>';
 
-        // ── Section 6: Per-crew monthly caps ─────────────────────────────────
-        const internalCrew = allCrew.filter(c => c.level !== 'Hired');
-        html += '<div>';
-        html += '<h3 class="text-sm font-semibold text-blue-400 mb-1 flex items-center gap-2"><i class="fas fa-user-clock text-xs"></i> Monthly Assignment Caps</h3>';
-        html += '<p class="text-xs text-muted mb-3">Limit how many shows a crew member can be assigned in a single month. Leave blank for no limit.</p>';
-        html += '<div class="glass-card-light p-3"><div class="grid grid-cols-2 gap-2">';
-        for (const c of internalCrew) {
-          html += '<div class="flex items-center gap-2">';
-          html += '<span class="text-sm flex-1">' + escapeHtml(c.name) + ' <span class="text-muted text-xs">(' + c.level + ')</span></span>';
-          const capVal = c.monthly_assignment_cap != null ? c.monthly_assignment_cap : '';
-          html += '<input type="number" class="admin-input" style="width:70px" id="cap-' + c.id + '" value="' + capVal + '" placeholder="∞">';
-          html += '<button onclick="saveCap(' + c.id + ')" class="btn-secondary px-2 py-1 rounded text-xs">Save</button>';
-          html += '</div>';
-        }
-        html += '</div></div></div>';
+        // Monthly caps moved to Crew tab
+        html += '<div class="glass-card-light p-3 border border-blue-400/10 flex items-center gap-3">';
+        html += '<i class="fas fa-users text-blue-400 text-sm flex-shrink-0"></i>';
+        html += '<p class="text-xs text-muted">Monthly assignment caps and crew capability settings have moved to the <strong class="text-white">Crew</strong> tab.</p>';
+        html += '</div>';
 
         html += '</div>';
         content.innerHTML = html;
@@ -3939,6 +3977,219 @@ app.get('/', (c) => {
         const data = await res.json();
         if (data.success) showToast('Cap saved', 'success');
         else showToast(data.error || 'Failed', 'error');
+      }
+
+      // --- CREW TAB ---
+      async function renderAdminCrew() {
+        const content = document.getElementById('admin-content');
+        content.innerHTML = '<p class="text-muted text-sm">Loading...</p>';
+        const res = await fetch('/api/crew');
+        const crew = await res.json();
+        window._crewData = crew;
+
+        const VENUES = ['JBT', 'Tata', 'Experimental', 'Godrej Dance', 'Little Theatre', 'Others'];
+        const VERTICALS = ['Indian Music', 'Intl Music', 'Western Music', 'Theatre', 'Dance', 'Library', 'Corporate', 'Others'];
+        const capOpts = '<option value="Y*">Y* (Specialist)</option><option value="Y">Y (Yes)</option><option value="N">N (No)</option>';
+
+        let html = '<div class="space-y-4">';
+
+        // Info box
+        html += '<div class="glass-card-light p-3 border border-blue-400/20 flex items-start gap-3">';
+        html += '<i class="fas fa-info-circle text-blue-400 mt-0.5 flex-shrink-0"></i>';
+        html += '<p class="text-xs text-muted leading-relaxed"><strong class="text-white">Capability matrix:</strong> <strong class="text-teal-400">Y*</strong> = Specialist (preferred by engine), <strong class="text-white">Y</strong> = Can do this, <strong class="text-red-400">N</strong> = Cannot do. The engine only assigns crew to venues and verticals marked Y or Y*.</p>';
+        html += '</div>';
+
+        // Crew list
+        html += '<div class="glass-card-light p-3">';
+        html += '<div class="flex justify-between items-center mb-3">';
+        html += '<h3 class="text-sm font-semibold text-blue-400">All Crew Members</h3>';
+        html += '<button onclick="showCrewForm(null)" class="btn-primary px-3 py-1.5 rounded-lg text-xs"><i class="fas fa-plus mr-1"></i>Add New Crew Member</button>';
+        html += '</div>';
+        html += '<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">Name</th>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">Level</th>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">Stage?</th>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">Urgent only?</th>';
+        html += '<th class="text-left py-1.5 text-muted font-normal text-xs">Monthly Cap</th>';
+        html += '<th class="w-28"></th>';
+        html += '</tr></thead><tbody>';
+        for (const m of crew) {
+          html += '<tr class="border-t border-white/5">';
+          html += '<td class="py-2 font-medium">' + escapeHtml(m.name) + '</td>';
+          const levelColor = m.level === 'Senior' ? 'text-blue-400' : m.level === 'Mid' ? 'text-teal-400' : m.level === 'Junior' ? 'text-amber-400' : 'text-muted';
+          html += '<td class="py-2 text-xs ' + levelColor + '">' + m.level + '</td>';
+          html += '<td class="py-2 text-xs">' + (m.can_stage ? '<span class="text-teal-400">✓</span>' : '<span class="text-muted">—</span>') + '</td>';
+          html += '<td class="py-2 text-xs">' + (m.stage_only_if_urgent ? '<span class="text-amber-400">✓</span>' : '<span class="text-muted">—</span>') + '</td>';
+          html += '<td class="py-2 text-xs text-muted">' + (m.monthly_assignment_cap != null ? m.monthly_assignment_cap : '—') + '</td>';
+          html += '<td class="py-2"><div class="flex gap-1">';
+          html += '<button onclick="showCrewForm(' + m.id + ')" class="btn-secondary px-2 py-1 rounded text-xs">Edit</button>';
+          html += '<button onclick="deleteCrew(' + m.id + ')" class="text-red-400 hover:text-red-300 px-2 py-1 rounded text-xs border border-red-400/20 hover:border-red-300/30 transition-colors">Delete</button>';
+          html += '</div></td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table></div></div>';
+
+        // Add/Edit form (hidden by default)
+        html += '<div id="crew-form" class="hidden glass-card-light p-4 border border-blue-400/20">';
+        html += '<h3 id="crew-form-title" class="text-sm font-semibold text-blue-400 mb-3">Add New Crew Member</h3>';
+        html += '<input type="hidden" id="crew-form-id" value="">';
+
+        // Name + Level
+        html += '<div class="grid grid-cols-2 gap-3 mb-3">';
+        html += '<div><label class="text-xs text-muted block mb-1">Name</label>';
+        html += '<input type="text" id="cf-name" class="admin-input w-full" placeholder="e.g. Suresh"></div>';
+        html += '<div><label class="text-xs text-muted block mb-1">Level</label>';
+        html += '<select id="cf-level" class="admin-input w-full"><option value="Senior">Senior</option><option value="Mid">Mid</option><option value="Junior">Junior</option><option value="Hired">Hired</option></select></div>';
+        html += '</div>';
+
+        // Flags
+        html += '<div class="flex gap-4 mb-3 flex-wrap">';
+        html += '<label class="flex items-center gap-2 text-xs cursor-pointer"><input type="checkbox" id="cf-can-stage" checked class="rounded"> Can do stage work?</label>';
+        html += '<label class="flex items-center gap-2 text-xs cursor-pointer"><input type="checkbox" id="cf-urgent-only"> Stage only if urgent?</label>';
+        html += '<label class="flex items-center gap-2 text-xs cursor-pointer"><input type="checkbox" id="cf-outside"> Is outside/hired crew?</label>';
+        html += '</div>';
+
+        // Cap + Notes
+        html += '<div class="grid grid-cols-2 gap-3 mb-4">';
+        html += '<div><label class="text-xs text-muted block mb-1">Monthly Cap (blank = no limit)</label>';
+        html += '<input type="number" id="cf-cap" class="admin-input" style="width:100px" placeholder="∞" min="1"></div>';
+        html += '<div><label class="text-xs text-muted block mb-1">Special Notes (optional)</label>';
+        html += '<input type="text" id="cf-notes" class="admin-input w-full" placeholder="Any notes..."></div>';
+        html += '</div>';
+
+        // Capability grids
+        html += '<div class="grid grid-cols-2 gap-6 mb-4">';
+
+        // Venue capabilities
+        html += '<div><p class="text-xs font-semibold text-blue-300 mb-2"><i class="fas fa-theater-masks mr-1"></i>Venue Capabilities</p>';
+        html += '<table class="w-full text-xs"><tbody>';
+        for (const v of VENUES) {
+          html += '<tr class="border-t border-white/5"><td class="py-1.5 pr-3 text-muted w-32">' + v + '</td>';
+          html += '<td class="py-1"><select class="admin-input py-0.5 text-xs vc-sel" data-venue="' + v + '" style="width:140px">' + capOpts + '</select></td></tr>';
+        }
+        html += '</tbody></table></div>';
+
+        // Vertical capabilities
+        html += '<div><p class="text-xs font-semibold text-blue-300 mb-2"><i class="fas fa-sitemap mr-1"></i>Vertical Capabilities</p>';
+        html += '<table class="w-full text-xs"><tbody>';
+        for (const vert of VERTICALS) {
+          html += '<tr class="border-t border-white/5"><td class="py-1.5 pr-3 text-muted w-36">' + vert + '</td>';
+          html += '<td class="py-1"><select class="admin-input py-0.5 text-xs vt-sel" data-vert="' + vert + '" style="width:140px">' + capOpts + '</select></td></tr>';
+        }
+        html += '</tbody></table></div>';
+
+        html += '</div>'; // end grid
+
+        // Buttons
+        html += '<div class="flex gap-2">';
+        html += '<button onclick="saveCrewMember()" class="btn-primary px-4 py-2 rounded-lg text-sm"><i class="fas fa-save mr-2"></i>Save</button>';
+        html += '<button onclick="document.getElementById(&apos;crew-form&apos;).classList.add(&apos;hidden&apos;)" class="btn-secondary px-4 py-2 rounded-lg text-sm">Cancel</button>';
+        html += '</div>';
+        html += '</div>'; // end form
+
+        html += '</div>'; // end space-y-4
+        content.innerHTML = html;
+      }
+
+      function showCrewForm(id) {
+        const form = document.getElementById('crew-form');
+        form.classList.remove('hidden');
+        form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+        const VENUES = ['JBT', 'Tata', 'Experimental', 'Godrej Dance', 'Little Theatre', 'Others'];
+        const VERTICALS = ['Indian Music', 'Intl Music', 'Western Music', 'Theatre', 'Dance', 'Library', 'Corporate', 'Others'];
+
+        if (id === null) {
+          // New crew: clear form
+          document.getElementById('crew-form-title').textContent = 'Add New Crew Member';
+          document.getElementById('crew-form-id').value = '';
+          document.getElementById('cf-name').value = '';
+          document.getElementById('cf-level').value = 'Mid';
+          document.getElementById('cf-can-stage').checked = true;
+          document.getElementById('cf-urgent-only').checked = false;
+          document.getElementById('cf-outside').checked = false;
+          document.getElementById('cf-cap').value = '';
+          document.getElementById('cf-notes').value = '';
+          // Default capabilities to Y
+          document.querySelectorAll('.vc-sel').forEach(s => s.value = 'Y');
+          document.querySelectorAll('.vt-sel').forEach(s => s.value = 'Y');
+        } else {
+          // Edit: pre-fill from stored data
+          const m = (window._crewData || []).find(x => x.id === id);
+          if (!m) return;
+          document.getElementById('crew-form-title').textContent = 'Edit: ' + m.name;
+          document.getElementById('crew-form-id').value = id;
+          document.getElementById('cf-name').value = m.name;
+          document.getElementById('cf-level').value = m.level;
+          document.getElementById('cf-can-stage').checked = !!m.can_stage;
+          document.getElementById('cf-urgent-only').checked = !!m.stage_only_if_urgent;
+          document.getElementById('cf-outside').checked = !!m.is_outside_crew;
+          document.getElementById('cf-cap').value = m.monthly_assignment_cap != null ? m.monthly_assignment_cap : '';
+          document.getElementById('cf-notes').value = m.special_notes || '';
+          // Set capability selects
+          const vc = m.venue_capabilities || {};
+          document.querySelectorAll('.vc-sel').forEach(s => {
+            const v = s.getAttribute('data-venue');
+            s.value = vc[v] || 'Y';
+          });
+          const vtc = m.vertical_capabilities || {};
+          document.querySelectorAll('.vt-sel').forEach(s => {
+            const vert = s.getAttribute('data-vert');
+            s.value = vtc[vert] || 'Y';
+          });
+        }
+      }
+
+      async function saveCrewMember() {
+        const idVal = document.getElementById('crew-form-id').value;
+        const name = document.getElementById('cf-name').value.trim();
+        if (!name) { showToast('Name is required', 'error'); return; }
+
+        const venue_capabilities = {};
+        document.querySelectorAll('.vc-sel').forEach(s => {
+          venue_capabilities[s.getAttribute('data-venue')] = s.value;
+        });
+        const vertical_capabilities = {};
+        document.querySelectorAll('.vt-sel').forEach(s => {
+          vertical_capabilities[s.getAttribute('data-vert')] = s.value;
+        });
+
+        const body = {
+          name,
+          level: document.getElementById('cf-level').value,
+          can_stage: document.getElementById('cf-can-stage').checked,
+          stage_only_if_urgent: document.getElementById('cf-urgent-only').checked,
+          is_outside_crew: document.getElementById('cf-outside').checked,
+          monthly_assignment_cap: document.getElementById('cf-cap').value,
+          special_notes: document.getElementById('cf-notes').value.trim() || null,
+          venue_capabilities,
+          vertical_capabilities
+        };
+
+        const url = idVal ? '/api/crew/' + idVal : '/api/crew';
+        const method = idVal ? 'PUT' : 'POST';
+        const res = await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+        const data = await res.json();
+        if (data.success || data.id) {
+          showToast(idVal ? 'Crew member updated' : 'Crew member added', 'success');
+          renderAdminCrew();
+        } else {
+          showToast(data.error || 'Save failed', 'error');
+        }
+      }
+
+      async function deleteCrew(id) {
+        const m = (window._crewData || []).find(x => x.id === id);
+        const name = m ? m.name : 'this crew member';
+        if (!confirm('Remove ' + name + '? This will also delete their day-off records and workload history. This cannot be undone.')) return;
+        const res = await fetch('/api/crew/' + id, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+          showToast(name + ' removed', 'success');
+          renderAdminCrew();
+        } else {
+          showToast(data.error || 'Delete failed', 'error');
+        }
       }
 
       // --- HISTORY IMPORT TAB ---
