@@ -570,8 +570,8 @@ app.post('/api/assignments/run', async (c) => {
   
   // Track current month workload (for updating at end)
   const currentMonthWorkload: Record<number, number> = {}
-  
-  const NAREN_MONTHLY_LIMIT = 0
+
+  const NAREN_MONTHLY_LIMIT = Infinity
   const narenCrew = crew.find(c => c.name === 'Naren')
   const narenId = narenCrew?.id || -1
   
@@ -1095,7 +1095,7 @@ app.post('/api/assignments/redo', async (c) => {
   }
   
   const currentMonthWorkload: Record<number, number> = {}
-  const NAREN_MONTHLY_LIMIT = 0
+  const NAREN_MONTHLY_LIMIT = Infinity
   const narenCrew = crew.find(c => c.name === 'Naren')
   const narenId = narenCrew?.id || -1
 
@@ -2576,7 +2576,7 @@ app.get('/', (c) => {
         const minCount = Math.min(...counts);
         const avgCount = counts.reduce((a, b) => a + b, 0) / counts.length;
         
-        const narenCapLimit = 9;
+
         let html = '';
         for (const [name, count] of sorted) {
           // Color: green if below avg, yellow if avg, red if high
@@ -2584,8 +2584,7 @@ app.get('/', (c) => {
           if (count > avgCount + 2) colorClass = 'text-red-400'; // overloaded
           else if (count > avgCount) colorClass = 'text-amber-400'; // slightly high
 
-          const capSuffix = name === 'Naren' ? ' <span class="text-white/40 text-xs">(' + count + '/' + narenCapLimit + ' cap)</span>' : '';
-          html += '<span class="px-2 py-1 rounded bg-white/5">' + name + ': <span class="' + colorClass + ' font-medium">' + count + '</span>' + capSuffix + '</span>';
+          html += '<span class="px-2 py-1 rounded bg-white/5">' + name + ': <span class="' + colorClass + ' font-medium">' + count + '</span></span>';
         }
         
         document.getElementById('workload-content').innerHTML = html;
