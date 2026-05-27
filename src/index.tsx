@@ -42,6 +42,8 @@ app.use('/api/*', cors())
 // ============================================
 
 const VENUE_MAP: Record<string, string> = {
+  'JBT Museum': 'JBT Museum',
+  'Jamshed Bhabha Theatre Museum': 'JBT Museum',
   'JBT': 'JBT',
   'Jamshed Bhabha Theatre': 'JBT',
   'TT': 'Tata',
@@ -111,6 +113,7 @@ const TEAM_TO_VERTICAL: Record<string, string> = {
 
 const VENUE_DEFAULTS: Record<string, number> = {
   'JBT': 3,
+  'JBT Museum': 1,
   'Tata': 3,
   'Experimental': 2,
   'Godrej Dance': 1,
@@ -456,17 +459,24 @@ const LEVEL_ORDER: Record<string, number> = { 'Senior': 0, 'Mid': 1, 'Junior': 2
 // on the same date. Uses venue_normalized values.
 const VENUE_PRIORITY: Record<string, number> = {
   'JBT': 1,
-  'Tata': 2,
-  'Experimental': 3,
-  'Little Theatre': 4,
-  'Godrej Dance': 5,
+  'JBT Museum': 2,
+  'Tata': 3,
+  'Experimental': 4,
+  'Little Theatre': 5,
+  'Godrej Dance': 6,
 }
 const getVenuePriority = (v: string): number => VENUE_PRIORITY[v] ?? 99
 
 function canDoFOH(crew: CrewMember, venue: string, vertical: string): { can: boolean, isSpecialist: boolean } {
+  if (venue === 'JBT Museum') {
+    const verticalCapability = crew.vertical_capabilities[vertical]
+    if (!verticalCapability || verticalCapability === 'N') return { can: false, isSpecialist: false }
+    return { can: true, isSpecialist: verticalCapability === 'Y*' }
+  }
+
   const venueCapability = crew.venue_capabilities[venue]
   const verticalCapability = crew.vertical_capabilities[vertical]
-  
+
   if (!venueCapability || venueCapability === 'N') {
     return { can: false, isSpecialist: false }
   }
@@ -1893,6 +1903,7 @@ app.get('/', (c) => {
               <label class="block text-sm font-medium mb-2">Venue <span class="manual-badge ml-2">Multi-venue</span></label>
               <select id="modal-venue" class="w-full py-3">
                 <option value="JBT">JBT (Jamshed Bhabha Theatre)</option>
+                <option value="JBT Museum">JBT Museum</option>
                 <option value="Tata">TT (Tata Theatre)</option>
                 <option value="Experimental">TET (Experimental Theatre)</option>
                 <option value="Godrej Dance">GDT (Godrej Dance Theatre)</option>
