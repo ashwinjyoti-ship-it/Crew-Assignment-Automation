@@ -561,8 +561,7 @@ app.post('/api/assignments/run', async (c) => {
   // Track current month workload (for updating at end)
   const currentMonthWorkload: Record<number, number> = {}
   
-  // Naren's monthly assignment limit (second-in-command with admin duties)
-  const NAREN_MONTHLY_LIMIT = 9
+  const NAREN_MONTHLY_LIMIT = 0
   const narenCrew = crew.find(c => c.name === 'Naren')
   const narenId = narenCrew?.id || -1
   
@@ -1086,7 +1085,7 @@ app.post('/api/assignments/redo', async (c) => {
   }
   
   const currentMonthWorkload: Record<number, number> = {}
-  const NAREN_MONTHLY_LIMIT = 9
+  const NAREN_MONTHLY_LIMIT = 0
   const narenCrew = crew.find(c => c.name === 'Naren')
   const narenId = narenCrew?.id || -1
 
