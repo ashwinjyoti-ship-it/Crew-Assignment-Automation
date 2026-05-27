@@ -570,11 +570,7 @@ app.post('/api/assignments/run', async (c) => {
   
   // Track current month workload (for updating at end)
   const currentMonthWorkload: Record<number, number> = {}
-  
-  const NAREN_MONTHLY_LIMIT = 0
-  const narenCrew = crew.find(c => c.name === 'Naren')
-  const narenId = narenCrew?.id || -1
-  
+
   // Get unavailability
   const unavailResult = await DB.prepare('SELECT crew_id, unavailable_date FROM crew_unavailability').all()
   const unavailMap: Record<string, Set<number>> = {}
@@ -711,11 +707,6 @@ app.post('/api/assignments/run', async (c) => {
         if (unavailMap[date]?.has(crewId)) return false
         if (dailyAssignments[date]?.has(crewId)) return false
       }
-      // Check Naren's monthly limit (admin duties cap)
-      if (crewId === narenId) {
-        const narenCurrentMonth = currentMonthWorkload[narenId] || 0
-        if (narenCurrentMonth >= NAREN_MONTHLY_LIMIT) return false
-      }
       return true
     }
     
@@ -744,18 +735,14 @@ app.post('/api/assignments/run', async (c) => {
           }
           // else: preferred crew capable but not for this venue — fall through to normal assignment
         } else {
-          // Preferred crew is NOT available (day-off, already assigned, or Naren cap)
+          // Preferred crew is NOT available (day-off or already assigned)
           preferenceConflict = true
           eventAssignment.foh_conflict = true
-          const narenAtCap = preferredCrew.id === narenId && (currentMonthWorkload[narenId] || 0) >= NAREN_MONTHLY_LIMIT
-          const unavailReason = narenAtCap
-            ? `Naren at monthly cap (${currentMonthWorkload[narenId] || 0}/${NAREN_MONTHLY_LIMIT})`
-            : 'day-off or already assigned'
           conflicts.push({
             event_id: event.id,
             event_name: event.name,
             type: 'FOH Preference',
-            reason: `Preferred FOH "${preferredCrew.name}" unavailable (${unavailReason}). Manual assignment required.`
+            reason: `Preferred FOH "${preferredCrew.name}" unavailable (day-off or already assigned). Manual assignment required.`
           })
         }
       }
@@ -847,17 +834,7 @@ app.post('/api/assignments/run', async (c) => {
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
       } else {
         eventAssignment.foh_conflict = true
-        let fohConflictReason = 'No qualified FOH available'
-        // If Naren would be capable but is blocked by cap, surface that in the reason
-        if (narenCrew) {
-          const narenMonthly = currentMonthWorkload[narenId] || 0
-          if (narenMonthly >= NAREN_MONTHLY_LIMIT) {
-            const { can } = canDoFOH(narenCrew, event.venue_normalized, event.vertical)
-            if (can) {
-              fohConflictReason = `No qualified FOH available — Naren at monthly cap (${narenMonthly}/${NAREN_MONTHLY_LIMIT}), assign manually`
-            }
-          }
-        }
+        const fohConflictReason = 'No qualified FOH available'
         conflicts.push({
           event_id: event.id,
           event_name: event.name,
@@ -1095,9 +1072,6 @@ app.post('/api/assignments/redo', async (c) => {
   }
   
   const currentMonthWorkload: Record<number, number> = {}
-  const NAREN_MONTHLY_LIMIT = 0
-  const narenCrew = crew.find(c => c.name === 'Naren')
-  const narenId = narenCrew?.id || -1
 
   // Get unavailability
   const unavailResult = await DB.prepare('SELECT crew_id, unavailable_date FROM crew_unavailability').all()
@@ -1168,7 +1142,6 @@ app.post('/api/assignments/redo', async (c) => {
       if (unavailMap[date]?.has(crewId)) return false
       if (dailyAssignments[date]?.has(crewId)) return false
     }
-    if (crewId === narenId && (currentMonthWorkload[narenId] || 0) >= NAREN_MONTHLY_LIMIT) return false
     return true
   }
   
@@ -1329,16 +1302,7 @@ app.post('/api/assignments/redo', async (c) => {
         await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, selectedFOH.id, 'FOH').run()
       } else if (!event.needs_manual_review && !matchingPref) {
         eventAssignment.foh_conflict = true
-        let fohConflictReason = 'No qualified FOH available'
-        if (narenCrew) {
-          const narenMonthly = currentMonthWorkload[narenId] || 0
-          if (narenMonthly >= NAREN_MONTHLY_LIMIT) {
-            const { can } = canDoFOH(narenCrew, event.venue_normalized, event.vertical)
-            if (can) {
-              fohConflictReason = `No qualified FOH available — Naren at monthly cap (${narenMonthly}/${NAREN_MONTHLY_LIMIT}), assign manually`
-            }
-          }
-        }
+        const fohConflictReason = 'No qualified FOH available'
         conflicts.push({
           event_id: event.id,
           event_name: event.name,
@@ -2576,7 +2540,7 @@ app.get('/', (c) => {
         const minCount = Math.min(...counts);
         const avgCount = counts.reduce((a, b) => a + b, 0) / counts.length;
         
-        const narenCapLimit = 9;
+
         let html = '';
         for (const [name, count] of sorted) {
           // Color: green if below avg, yellow if avg, red if high
@@ -2584,8 +2548,7 @@ app.get('/', (c) => {
           if (count > avgCount + 2) colorClass = 'text-red-400'; // overloaded
           else if (count > avgCount) colorClass = 'text-amber-400'; // slightly high
 
-          const capSuffix = name === 'Naren' ? ' <span class="text-white/40 text-xs">(' + count + '/' + narenCapLimit + ' cap)</span>' : '';
-          html += '<span class="px-2 py-1 rounded bg-white/5">' + name + ': <span class="' + colorClass + ' font-medium">' + count + '</span>' + capSuffix + '</span>';
+          html += '<span class="px-2 py-1 rounded bg-white/5">' + name + ': <span class="' + colorClass + ' font-medium">' + count + '</span></span>';
         }
         
         document.getElementById('workload-content').innerHTML = html;
