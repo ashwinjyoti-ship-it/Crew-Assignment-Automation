@@ -81,11 +81,41 @@ Events automatically flagged:
 | Junior | Omkar, Akshay |
 | Outside Crew | OC1, OC2, OC3 (Stage-only, last resort) |
 
+> The roster above is the initial seed. The crew list and capability matrix are
+> now **fully editable from the app** — see Crew Settings below. The seed only
+> defines the starting state.
+
+## ⚙️ Crew Settings (Configurable Roster & Capability Matrix)
+
+Click the **Settings** button in the header to open the Crew management panel.
+The roster is no longer hard-coded — manage it directly as crew join, leave, or
+gain experience:
+
+- **Add** a new crew member (name, level, stage flags, special notes)
+- **Edit / update** any crew member's capability matrix as their experience grows
+- **Delete** crew who have left — also removes their day-off records and workload history
+- Visual capability matrix: per-venue and per-vertical dropdowns
+  - **Y\*** = Specialist (preferred by the engine)
+  - **Y** = Can do this
+  - **N** = Cannot do (engine never assigns to these venues/verticals)
+
+Changes take effect immediately: the day-off calendar refreshes so newly added
+crew appear and removed crew disappear without reloading. Internal crew
+(Senior/Mid/Junior) show in the day-off calendar; outside/hired crew do not, by
+design.
+
+> **Note:** Because the roster now lives in the database, re-running
+> `npm run db:seed` will reset it to the seed roster and overwrite any edits made
+> through Settings. Only seed on a fresh database.
+
 ## 📊 API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/crew` | GET | List all crew with capabilities |
+| `/api/crew` | POST | Add a new crew member |
+| `/api/crew/:id` | PUT | Update a crew member (name, level, flags, capability matrix) |
+| `/api/crew/:id` | DELETE | Remove a crew member (cleans up day-offs & workload history) |
 | `/api/unavailability` | GET/POST/DELETE | Manage day-offs |
 | `/api/unavailability/bulk` | POST | Bulk add/remove day-offs |
 | `/api/events/upload` | POST | Upload events from CSV |
@@ -157,7 +187,7 @@ npm run deploy
 
 ---
 
-**Last Updated**: 30 January 2026  
-**Version**: 1.0 Stable  
+**Last Updated**: 28 June 2026  
+**Version**: 1.0 Stable (+ configurable Crew Settings)  
 
 *Built as a co-pilot to reduce cognitive load for bulk scheduling, while preserving human judgment for edge cases.*
